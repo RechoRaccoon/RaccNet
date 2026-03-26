@@ -7,7 +7,7 @@ A YouTube-style video platform built on top of ATmosphere's AT Protocol — brow
 ## Installation
 
 1. Go to the [**Releases**](../../releases) section on the right side of this page
-2. Download the latest **`RaccTube.exe`**
+2. On the latest version, open "Assets" and Download **`RaccTube.exe`**
 3. Run it — no install needed
 4. Sign in with your ATmosphere handle and an [App Password](https://bsky.app/settings/app-passwords)
    - Your App Password **must have Direct Messages enabled** if you want DM features
