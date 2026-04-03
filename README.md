@@ -1,5 +1,5 @@
 # RaccNet
-A YouTube-style video platform built on top of ATmosphere's AT Protocol — browse, watch, upload, and share videos using your existing ATmosphere account!
+A YouTube-style video platform built on top of the AT Protocol — browse, watch, upload, and share videos using your existing ATmosphere/Bluesky account!
 ---
 ## Installation
 1. Go to the [**Releases**](../../releases) section on the right side of this page
@@ -20,19 +20,6 @@ If something doesn't work, that's probably why. Feedback and bug reports are wel
 ---
 ## Vibe Coded Disclaimer
 This project is being vibe coded :3
----
-## Features
-- **Watch Videos** — Browse and watch ATmosphere-hosted videos from people you follow or the wider network
-- **Your Feed** — "From Friends" tab shows videos + posts from your ATmosphere follows
-- **Subscriptions** — Dedicated subscriptions feed with Videos and Posts sub-tabs
-- **Search** — Search for channels and videos across the network
-- **Custom Feeds** — Browse any ATmosphere feed generator as a video feed
-- **DMs** — Full direct message chat UI inside channel pages (requires App Password with DM access)
-- **Like, Repost, Share** — Full ATmosphere social interactions
-- **Watch History** — Locally stored watch history (up to 500 entries)
-- **Content Filter** — Toggle between All / SFW / NSFW content
-- **Customizable Accent Color** — Pick your own theme color (default: `#00FF07` neon green)
-- **No account required to browse** — Sign in with any ATmosphere handle + App Password to unlock social features
 ---
 ## Built With
 - **Frontend:** Preact + htm (loaded from CDN — no build step, no npm)
