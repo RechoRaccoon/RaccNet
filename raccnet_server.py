@@ -1840,7 +1840,7 @@ function saveAccent(v){ try{localStorage.setItem(ACCENT_KEY,v);}catch(e){} }
 function loadFilter(){ try{return localStorage.getItem(FILTER_KEY)||'all';}catch(e){return 'all';} }
 function saveFilter(v){ try{localStorage.setItem(FILTER_KEY,v);}catch(e){} }
 const MOBILECOLS_KEY = 'raccnet_mobilecols';
-function loadMobileCols(){ try{var v=parseInt(localStorage.getItem(MOBILECOLS_KEY));return (v>=1&&v<=5)?v:2;}catch(e){return 2;} }
+function loadMobileCols(){ try{var v=parseInt(localStorage.getItem(MOBILECOLS_KEY));return (v>=1&&v<=5)?v:1;}catch(e){return 1;} }
 function saveMobileCols(v){ try{localStorage.setItem(MOBILECOLS_KEY,String(v));window.dispatchEvent(new CustomEvent("raccnet_mobilecols",{detail:v}));}catch(e){} }
 function hexToRgb(hex){
   var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
@@ -2056,6 +2056,7 @@ const DEFAULT_FEEDS = [
 // ── FollowStrip — scrollable row of channel avatars with arrow buttons ────────
 function FollowStrip(props) {
   const scrollRef = useRef(null);
+  const portrait = usePortrait();
   function scrollBy(dx) {
     if (scrollRef.current) scrollRef.current.scrollBy({left:dx, behavior:'smooth'});
   }
@@ -2070,23 +2071,23 @@ function FollowStrip(props) {
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
       </button>
       <div ref=${scrollRef}
-        style=${{display:'flex',gap:20,overflowX:'auto',flex:1,
+        style=${{display:'flex',gap:portrait?8:20,overflowX:'auto',flex:1,
           scrollbarWidth:'none',msOverflowStyle:'none',padding:'8px 12px'}}>
         ${(props.actors||[]).map(function(actor,i){
           return html`<div key=${actor.did||i}
             onClick=${function(){props.onChannel(actor.handle);}}
-            style=${{display:'flex',flexDirection:'column',alignItems:'center',gap:10,
-              cursor:'pointer',flexShrink:0,width:130}}
+            style=${{display:'flex',flexDirection:'column',alignItems:'center',gap:portrait?4:10,
+              cursor:'pointer',flexShrink:0,width:portrait?60:130}}
             onMouseEnter=${function(e){e.currentTarget.querySelector('div').style.boxShadow='0 0 0 4px var(--accent), 0 0 12px rgba(var(--accent-rgb,0,255,7),0.5)';}}
             onMouseLeave=${function(e){e.currentTarget.querySelector('div').style.boxShadow='0 0 0 4px var(--accent)';;}}>
-            <div style=${{width:110,height:110,borderRadius:'50%',overflow:'hidden',background:'#272727',
+            <div style=${{width:portrait?48:110,height:portrait?48:110,borderRadius:'50%',overflow:'hidden',background:'#272727',
               boxShadow:'0 0 0 4px var(--accent)',
               boxSizing:'border-box',flexShrink:0}}>
               ${actor.avatar
                 ? html`<img src=${actor.avatar} alt="" style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`
                 : null}
             </div>
-            <span style=${{fontSize:13,color:'#ccc',textAlign:'center',width:'100%',
+            <span style=${{fontSize:portrait?10:13,color:'#ccc',textAlign:'center',width:'100%',
               overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
               ${actor.displayName||actor.handle}
             </span>
@@ -4187,6 +4188,17 @@ function WatchPage(props) {
   const ADULT_LABELS=['sexual','porn','nudity','graphic-media','adult'];
   const isAdult=!!(displayPost.labels&&displayPost.labels.some(function(l){return ADULT_LABELS.indexOf(l.val)!==-1;}));
   const [downloading, setDownloading] = useState(false);
+  const [watchMenuOpen, setWatchMenuOpen] = useState(false);
+  const [watchMenuHov, setWatchMenuHov] = useState(false);
+  const [watchOptHov, setWatchOptHov] = useState('');
+  const [watchMenuView, setWatchMenuView] = useState('main');
+  const [watchPlaylistMsg, setWatchPlaylistMsg] = useState('');
+  const [watchPlaylistLoading, setWatchPlaylistLoading] = useState(false);
+  const [watchUserPlaylists, setWatchUserPlaylists] = useState([]);
+  const [watchPlItemHov, setWatchPlItemHov] = useState(-1);
+  const [watchBlockLoading, setWatchBlockLoading] = useState(false);
+  const [watchBlocked, setWatchBlocked] = useState(false);
+  const watchMenuRef = useRef(null);
 
   async function downloadVideo() {
     if (downloading) return;
@@ -4216,6 +4228,55 @@ function WatchPage(props) {
     setDownloading(false);
   }
 
+  async function watchBlockChannel() {
+    if (!sess || !author || !author.did) return;
+    setWatchBlockLoading(true);
+    try {
+      const res = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body: JSON.stringify({repo:sess.did,collection:'app.bsky.graph.block',
+          record:{'$type':'app.bsky.graph.block',subject:author.did,createdAt:new Date().toISOString()}})
+      });
+      if (res.ok) { setWatchBlocked(true); if(_blockedDidsSet) _blockedDidsSet.add(author.did); }
+    } catch(e) {}
+    setWatchBlockLoading(false);
+    setWatchMenuOpen(false);
+  }
+
+  async function watchOpenPlaylists() {
+    setWatchMenuView('playlists');
+    if (!sess) { setWatchUserPlaylists([]); return; }
+    setWatchPlaylistLoading(true);
+    try {
+      var r = await api(AUTH_PROXY+'/app.bsky.graph.getLists?actor='+encodeURIComponent(sess.did)+'&limit=100',
+        {headers:{Authorization:'Bearer '+sess.accessJwt}});
+      if (r.ok) {
+        var d = await r.json();
+        setWatchUserPlaylists((d.lists||[]).filter(function(l){return (l.description||'').startsWith('RaccNet Playlist');}));
+      } else { setWatchUserPlaylists([]); }
+    } catch(e) { setWatchUserPlaylists([]); }
+    setWatchPlaylistLoading(false);
+  }
+
+  async function watchAddToPlaylist(listUri) {
+    setWatchPlaylistMsg('Adding…');
+    try {
+      if (!sess) { setWatchPlaylistMsg('Not signed in.'); return; }
+      var res = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body: JSON.stringify({repo:sess.did,collection:'raccnet.playlist.item',
+          record:{'$type':'raccnet.playlist.item',postUri:displayPost.uri,postCid:displayPost.cid||'',
+            listUri:listUri,createdAt:new Date().toISOString()}})
+      });
+      if (res.ok) {
+        setWatchPlaylistMsg('Added!');
+        setTimeout(function(){setWatchMenuOpen(false);setWatchMenuView('main');setWatchPlaylistMsg('');},900);
+      } else { setWatchPlaylistMsg('Error adding.'); }
+    } catch(e) { setWatchPlaylistMsg('Error adding.'); }
+  }
+
   return html`<div style=${{display:'flex',flexDirection:portrait?'column':'row',gap:24,padding:portrait?'12px 8px':24,maxWidth:1600,margin:'0 auto'}}>${showShare?html`<${ShareModal} post=${displayPost} session=${sess} onClose=${function(){setShowShare(false);}}/>`  :null}
     <div style=${{flex:1,minWidth:0}}>
       <div style=${{overflow:'hidden',background:'#000'}}>
@@ -4241,8 +4302,73 @@ function WatchPage(props) {
           <button onClick=${function(e){bClick(e);toggleLike();}} style=${bSt(liked)} onMouseEnter=${bHover(liked)} onMouseLeave=${function(e){bLeave(e,liked);}}><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>${liked?'Liked':fmt(likeCount)}</button>
           <button onClick=${function(e){bClick(e);if(sess)toggleDislike();}} style=${bSt(disliked)} onMouseEnter=${bHover(disliked)} onMouseLeave=${function(e){bLeave(e,disliked);}} title=${sess?'Dislike':'Sign in to dislike'}><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L10.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>${disliked?'Disliked':fmt(dislikeCount)}</button>
           <button onClick=${function(e){bClick(e);toggleRepost();}} style=${bSt(reposted)} onMouseEnter=${bHover(reposted)} onMouseLeave=${function(e){bLeave(e,reposted);}}><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>${reposted?'Reposted':fmt(repostCount)}</button>
-          <button onClick=${function(e){bClick(e);setShowShare(true);}} style=${bSt(false)} title="Share via DM" onMouseEnter=${bHover(false)} onMouseLeave=${function(e){bLeave(e,false);}}><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>Share</button>
-          <button onClick=${downloadVideo} disabled=${downloading} style=${bSt(false)} title="Download video" onMouseEnter=${bHover(false)} onMouseLeave=${function(e){bLeave(e,false);}}><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>${downloading?'Downloading…':'Download'}</button>
+          <div style=${{position:'relative'}} ref=${watchMenuRef}>
+            <button
+              onClick=${function(e){e.stopPropagation();setWatchMenuOpen(function(o){return !o;});if(!watchMenuOpen){setWatchMenuView('main');setWatchPlaylistMsg('');}}}
+              onMouseEnter=${function(){setWatchMenuHov(true);}}
+              onMouseLeave=${function(){setWatchMenuHov(false);}}
+              style=${{background:watchMenuHov||watchMenuOpen?'var(--accent-dim)':'var(--accent-solid-dim)',border:'1px solid '+(watchMenuOpen?'var(--accent)':'#333'),color:'var(--accent)',padding:'8px 12px',borderRadius:0,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',transition:'background 0.12s',flexShrink:0}}
+              title="More options">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+            </button>
+            ${watchMenuOpen?html`<div onClick=${function(e){e.stopPropagation();}}
+              style=${{position:'absolute',bottom:'calc(100% + 4px)',right:0,
+                background:'#1a1a1a',border:'1px solid var(--accent)',
+                minWidth:190,zIndex:500,boxShadow:'0 4px 20px rgba(0,0,0,0.7)'}}>
+              ${watchMenuView==='main'?html`<div>
+                <button style=${{display:'block',width:'100%',padding:'9px 14px',background:watchOptHov==='share'?'var(--accent-dim)':'none',border:'none',borderLeft:watchOptHov==='share'?'2px solid var(--accent)':'2px solid transparent',color:watchOptHov==='share'?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s'}}
+                  onMouseEnter=${function(){setWatchOptHov('share');}}
+                  onMouseLeave=${function(){setWatchOptHov('');}}
+                  onClick=${function(e){e.stopPropagation();setWatchMenuOpen(false);setShowShare(true);}}>
+                  Share via DM
+                </button>
+                <button style=${{display:'block',width:'100%',padding:'9px 14px',background:watchOptHov==='dl'?'var(--accent-dim)':'none',border:'none',borderLeft:watchOptHov==='dl'?'2px solid var(--accent)':'2px solid transparent',color:watchOptHov==='dl'?'var(--accent)':'#f1f1f1',fontSize:13,cursor:downloading?'default':'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s'}}
+                  onMouseEnter=${function(){setWatchOptHov('dl');}}
+                  onMouseLeave=${function(){setWatchOptHov('');}}
+                  onClick=${function(e){e.stopPropagation();setWatchMenuOpen(false);downloadVideo();}}>
+                  ${downloading?'Downloading…':'Download'}
+                </button>
+                <button style=${{display:'block',width:'100%',padding:'9px 14px',background:watchOptHov==='pl'?'var(--accent-dim)':'none',border:'none',borderLeft:watchOptHov==='pl'?'2px solid var(--accent)':'2px solid transparent',color:watchOptHov==='pl'?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s'}}
+                  onMouseEnter=${function(){setWatchOptHov('pl');}}
+                  onMouseLeave=${function(){setWatchOptHov('');}}
+                  onClick=${function(e){e.stopPropagation();watchOpenPlaylists();}}>
+                  Add to Playlist
+                </button>
+                ${sess&&!watchBlocked?html`<button style=${{display:'block',width:'100%',padding:'9px 14px',background:watchOptHov==='block'?'var(--accent-dim)':'none',border:'none',borderLeft:watchOptHov==='block'?'2px solid var(--accent)':'2px solid transparent',color:watchOptHov==='block'?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s'}}
+                  onMouseEnter=${function(){setWatchOptHov('block');}}
+                  onMouseLeave=${function(){setWatchOptHov('');}}
+                  onClick=${function(e){e.stopPropagation();watchBlockChannel();}}>
+                  ${watchBlockLoading?'Blocking…':'Block Channel'}
+                </button>`:null}
+              </div>`:null}
+              ${watchMenuView==='playlists'?html`<div>
+                <div style=${{padding:'8px 14px',borderBottom:'1px solid #2a2a2a',display:'flex',alignItems:'center',gap:8}}>
+                  <button onClick=${function(e){e.stopPropagation();setWatchMenuView('main');setWatchPlaylistMsg('');}}
+                    style=${{background:'none',border:'none',color:'#aaa',cursor:'pointer',padding:'2px 4px',fontSize:12,display:'flex',alignItems:'center',gap:4}}
+                    onMouseEnter=${function(e){e.currentTarget.style.color='var(--accent)';}}
+                    onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';}}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                    Back
+                  </button>
+                  <span style=${{fontSize:12,color:'#aaa',fontWeight:600}}>Add to Playlist</span>
+                </div>
+                ${watchPlaylistMsg?html`<div style=${{padding:'6px 14px',fontSize:12,color:'var(--accent)'}}>${watchPlaylistMsg}</div>`:null}
+                ${watchPlaylistLoading?html`<div style=${{padding:'10px 14px',fontSize:12,color:'#aaa'}}>Loading…</div>`:null}
+                ${!watchPlaylistLoading&&watchUserPlaylists&&watchUserPlaylists.length===0?html`<div style=${{padding:'8px 14px',fontSize:12,color:'#666'}}>No playlists yet.</div>`:null}
+                ${!watchPlaylistLoading&&watchUserPlaylists?watchUserPlaylists.map(function(pl,pi){return html`<button key=${pl.uri}
+                  style=${{display:'block',width:'100%',padding:'8px 14px',background:watchPlItemHov===pi?'var(--accent-dim)':'none',
+                    border:'none',borderLeft:watchPlItemHov===pi?'2px solid var(--accent)':'2px solid transparent',
+                    color:watchPlItemHov===pi?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',
+                    textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s',
+                    overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
+                  onMouseEnter=${function(){setWatchPlItemHov(pi);}}
+                  onMouseLeave=${function(){setWatchPlItemHov(-1);}}
+                  onClick=${function(e){e.stopPropagation();watchAddToPlaylist(pl.uri);}}>
+                  ${pl.name||'Unnamed Playlist'}
+                </button>`;}):[]}
+              </div>`:null}
+            </div>`:null}
+          </div>
           ${isAdult?html`<button onClick=${function(e){e.stopPropagation();if(sess)toggleCameToThis();}} style=${{background:cameToThis?'rgba(255,0,120,0.18)':'rgba(255,0,120,0.08)',border:'1px solid '+(cameToThis?'#ff55aa':'#ff0077'),color:'#ff55aa',display:'flex',alignItems:'center',gap:6,fontSize:14,padding:'8px 14px',borderRadius:0,cursor:sess?'pointer':'default'}} title=${sess?'Came to this':'Sign in to react'}>🔥 Came to this · ${fmt(cameCount)}</button>`:null}
         </div>
       </div>
@@ -4281,7 +4407,7 @@ function WatchPage(props) {
         `:null}
       `}
     </div>
-    <div style=${{width:portrait?'100%':402,flexShrink:portrait?0:0}}>
+    <div style=${{width:portrait?'100%':'clamp(260px, 30vw, 402px)',flexShrink:portrait?0:0}}>
       <h3 style=${{color:'#f1f1f1',fontSize:15,fontWeight:600,marginBottom:12}}>More from this channel</h3>
       ${related.length===0?html`<div style=${{color:'#aaa',fontSize:14,marginBottom:24}}>No related videos.</div>`:
         html`<div style=${{overflowY:'hidden',maxHeight:330,transition:'max-height 0.2s'}}
@@ -7389,9 +7515,7 @@ function ChannelPage(props) {
     </div>`:null}
 
     <div style=${{width:'100%',background:d.banner?'none':'linear-gradient(135deg,#1a1a2e,#0f3460)',
-      backgroundImage:d.banner?('url('+d.banner+')'):'none',
-      backgroundSize:'cover',backgroundPosition:'center',
-      minHeight:240,maxHeight:320,overflow:'hidden'}}>
+      overflow:'hidden'}}>
       ${d.banner?html`<img src=${d.banner} alt="" style=${{width:'100%',maxHeight:320,objectFit:'cover',display:'block'}}/>`:html`<div style=${{height:240}}/>`}
     </div>
     <div style=${{padding:'0 24px',borderBottom:'1px solid var(--accent)'}}>
