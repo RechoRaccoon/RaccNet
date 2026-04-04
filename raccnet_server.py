@@ -1155,7 +1155,7 @@ function Header(props) {
         <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
       </button>
       <button onClick=${props.onForward} title="Forward"
-        style=${{background:'none',border:'none',color:'#f1f1f1',padding:8,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}
+        style=${{background:'none',border:'none',color:'#f1f1f1',padding:portrait?4:8,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}
         onMouseEnter=${function(e){e.currentTarget.style.background='#272727';}}
         onMouseLeave=${function(e){e.currentTarget.style.background='none';}}>
         <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>
@@ -1165,7 +1165,7 @@ function Header(props) {
           ${portrait?null:html`<span style=${{fontSize:20,fontWeight:800,color:'var(--accent)',letterSpacing:-0.5}}>RaccNet</span>`}
         </div>
     </div>
-    <div style=${{flex:1,display:'flex',justifyContent:'center'}}>
+    <div style=${{flex:1,display:'flex',justifyContent:'center',minWidth:0}}>
       <form onSubmit=${submit} style=${{display:'flex',width:'100%',maxWidth:600}}>
         <input value=${props.input} onInput=${function(e){props.setInput(e.target.value);}}
           placeholder="Search"
@@ -1174,7 +1174,7 @@ function Header(props) {
           onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
           onBlur=${function(e){e.target.style.borderColor='var(--accent)';}}/>
         <button type="submit"
-          style=${{width:64,height:40,background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',borderLeft:'none',
+          style=${{width:portrait?44:64,height:40,background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',borderLeft:'none',
             borderRadius:0,color:'var(--accent)',display:'flex',alignItems:'center',justifyContent:'center'}}
           onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';}}
           onMouseLeave=${function(e){e.currentTarget.style.background='var(--accent-solid-dim)';}}>
@@ -1184,7 +1184,7 @@ function Header(props) {
         </button>
       </form>
     </div>
-    <div style=${{flexShrink:0,display:'flex',alignItems:'center',gap:8}}>
+    <div style=${{flexShrink:0,display:'flex',alignItems:'center',gap:portrait?4:8}}>
       ${props.session?html`<${NotificationBell} session=${props.session} onChannel=${props.onChannel}/>`:null}
       ${props.session?html`
         <button onClick=${props.onUpload} title="Upload video"
@@ -1511,6 +1511,7 @@ function SortButton(props) {
 // ── NotificationBell — header notification icon with dropdown ─────────────────
 function NotificationBell(props) {
   const sess = props.session;
+  const portrait = usePortrait();
   const onChannel = props.onChannel;
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
@@ -1638,7 +1639,7 @@ function NotificationBell(props) {
   return html`<div style=${{position:'relative'}} ref=${dropRef}>
     <button onClick=${toggleOpen} title="Notifications"
       style=${{background:'none',border:'1px solid var(--accent)',color:'var(--accent)',
-        padding:'7px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
+        padding:portrait?'4px 6px':'7px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
         position:'relative',borderRadius:0,transition:'background 0.12s'}}
       onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';}}
       onMouseLeave=${function(e){e.currentTarget.style.background='none';}}>

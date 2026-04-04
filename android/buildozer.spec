@@ -31,8 +31,8 @@ android.ndk = 25b
 # Architecture — arm64-v8a covers all modern phones; add x86_64 for emulators if needed
 android.archs = arm64-v8a
 
-# App icon (optional — place a 512x512 icon.png in this folder to use it)
-# icon.filename = %(source.dir)s/icon.png
+# App icon
+icon.filename = %(source.dir)s/icon.png
 
 # Presplash (optional — place a presplash.png here)
 # presplash.filename = %(source.dir)s/presplash.png
