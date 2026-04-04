@@ -49,6 +49,7 @@ if platform == 'android':
     WebViewClient    = autoclass('android.webkit.WebViewClient')
     WebChromeClient  = autoclass('android.webkit.WebChromeClient')
     FrameLayout      = autoclass('android.widget.FrameLayout')
+    FLP              = autoclass('android.widget.FrameLayout$LayoutParams')
     LP               = autoclass('android.view.ViewGroup$LayoutParams')
     View             = autoclass('android.view.View')
     Color            = autoclass('android.graphics.Color')
@@ -80,7 +81,7 @@ if platform == 'android':
             wv.setBackgroundColor(Color.parseColor('#0f0f0f'))
 
             # Full-screen overlay on top of the Kivy surface
-            params = FrameLayout.LayoutParams(LP.MATCH_PARENT, LP.MATCH_PARENT)
+            params = FLP(LP.MATCH_PARENT, LP.MATCH_PARENT)
             activity.addContentView(wv, params)
 
             wv.loadUrl('http://localhost:8080')
@@ -112,7 +113,7 @@ class LoadingScreen(BoxLayout):
         self.bind(pos=self._update_bg, size=self._update_bg)
 
         self._title = Label(
-            text='[color=#00FF07]Racco[/color][color=#f1f1f1]Net[/color]',
+            text='[color=#00FF07]Racc[/color][color=#f1f1f1]Net[/color]',
             markup=True,
             font_size='32sp',
             bold=True,
