@@ -55,6 +55,8 @@ jobs:
         run: cp raccnet_server.py android/raccnet_server.py
 
       - name: Build APK
+        env:
+          JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
         run: |
           cd android
           yes | buildozer android debug 2>&1
