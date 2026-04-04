@@ -1,0 +1,68 @@
+name: Build Android APK
+
+# Runs automatically on every push, OR manually from the GitHub website
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'raccnet_server.py'
+      - 'android/**'
+      - '.github/workflows/build_android.yml'
+  workflow_dispatch:   # lets you click "Run workflow" on GitHub.com manually
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            git zip unzip openjdk-17-jdk \
+            autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
+            cmake libffi-dev libssl-dev build-essential
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-buildozer-${{ runner.os }}
+
+      - name: Install buildozer + cython
+        run: pip install buildozer==1.5.0 cython==3.0.11 virtualenv
+
+      - name: Cache Android SDK/NDK (speeds up repeat builds a lot)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer/android/platform
+          key: buildozer-android-sdk-${{ hashFiles('android/buildozer.spec') }}
+          restore-keys: |
+            buildozer-android-sdk-
+
+      - name: Copy latest raccnet_server.py into android folder
+        run: cp raccnet_server.py android/raccnet_server.py
+
+      - name: Build APK
+        run: |
+          cd android
+          buildozer android debug 2>&1
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RaccNet-Android-APK
+          path: android/bin/*.apk
+          retention-days: 30   # APK stays available for 30 days after each build
+          if-no-files-found: error

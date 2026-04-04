@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "Bash(python -c \":*)",
+      "Bash(python -X utf8 -c \":*)",
+      "Bash(del \"C:\\\\Users\\\\Shadow\\\\Documents\\\\Recho Raccoon''s Projects\\\\Vibe Coded Websites\\\\RaccTube\\\\patch_racctube.py\" \"C:\\\\Users\\\\Shadow\\\\Documents\\\\Recho Raccoon''s Projects\\\\Vibe Coded Websites\\\\RaccTube\\\\fix_backticks.py\")",
+      "Bash(grep -v \"^[0-9]*:.*html\\\\`\\\\|^[0-9]*:.*//\\\\|^[0-9]*:.*const\\\\|^[0-9]*:.*var\\\\|^[0-9]*:.*function\\\\|^[0-9]*:.*style\\\\|^[0-9]*:.*if \\(\")",
+      "WebFetch(domain:atproto.com)",
+      "WebFetch(domain:docs.bsky.app)",
+      "Bash(del \"%APPDATA%\\\\RaccTube\\\\shortcuts_asked.flag\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''C:/Users/Shadow/Documents/Recho Raccoon\\\\''s Projects/Vibe Coded Websites/RaccTube/skytube_server.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Read(//tmp/**)",
+      "Bash(py -c \":*)"
+    ]
+  }
+}
