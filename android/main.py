@@ -12,11 +12,8 @@ import os
 import sys
 
 from kivy.app import App
-from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.widget import Widget
 from kivy.uix.label import Label
-from kivy.uix.image import Image as KivyImage
 from kivy.uix.scrollview import ScrollView
 from kivy.clock import Clock
 from kivy.utils import platform
@@ -112,7 +109,7 @@ if platform == 'android':
     Window.bind(on_keyboard=_handle_back)
 
 
-# ── Loading screen shown while the server starts ─────────────────────────────
+# ── Loading screen — plain dark background while server starts ───────────────
 class LoadingScreen(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(orientation='vertical', **kwargs)
@@ -122,50 +119,7 @@ class LoadingScreen(BoxLayout):
             self._bg = Rectangle(pos=self.pos, size=self.size)
         self.bind(pos=self._update_bg, size=self._update_bg)
 
-        import os
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.png')
-
-        # Top spacer
-        self.add_widget(Widget(size_hint=(1, 0.35)))
-
-        # Centered logo area
-        anchor = AnchorLayout(anchor_x='center', anchor_y='center', size_hint=(1, 0.25))
-        logo_row = BoxLayout(
-            orientation='horizontal',
-            size_hint=(None, None),
-            size=(286, 72),
-            spacing=14,
-        )
-        logo_img = KivyImage(
-            source=icon_path,
-            size_hint=(None, None),
-            size=(64, 64),
-            allow_stretch=True,
-            keep_ratio=True,
-            nocache=True,
-        )
-        self._title = Label(
-            text='[color=#00FF07]Racc[/color][color=#f1f1f1]Net[/color]',
-            markup=True,
-            font_size='36sp',
-            bold=True,
-            size_hint=(None, None),
-            size=(208, 72),
-            halign='left',
-            valign='middle',
-            text_size=(208, 72),   # fixed — prevents word-wrap
-        )
-        logo_row.add_widget(logo_img)
-        logo_row.add_widget(self._title)
-        anchor.add_widget(logo_row)
-        self.add_widget(anchor)
-
-        self._status = Label(
-            text='[color=#555555]Starting…[/color]',
-            markup=True,
-            font_size='14sp',
-            size_hint=(1, 0.12),
-        )
+        # Error display (only shown if server crashes)
         self._error_label = Label(
             text='',
             markup=False,
@@ -176,16 +130,15 @@ class LoadingScreen(BoxLayout):
             text_size=(None, None),
             halign='left',
             valign='top',
+            padding=(12, 8),
         )
-        scroll = ScrollView(size_hint=(1, 0.28))
+        scroll = ScrollView(size_hint=(1, 1))
         scroll.add_widget(self._error_label)
-
-        self.add_widget(self._status)
         self.add_widget(scroll)
 
     def set_error(self, msg):
-        self._status.text = '[color=#FF4444]Error — see below[/color]'
-        self._error_label.text = msg
+        self._error_label.text = '[color=#FF4444]Error:[/color]\n' + msg
+        self._error_label.markup = True
         self._error_label.texture_update()
         self._error_label.height = self._error_label.texture_size[1] + 20
 

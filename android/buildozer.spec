@@ -9,7 +9,7 @@ version = 1.0
 # Source
 source.dir = .
 source.include_exts = py
-source.include_patterns = raccnet_server.py, main.py
+source.include_patterns = raccnet_server.py, main.py, icon.png, icon_bg.png
 
 # Entry point
 entrypoint = main.py
@@ -31,11 +31,12 @@ android.ndk = 25b
 # Architecture — arm64-v8a covers all modern phones; add x86_64 for emulators if needed
 android.archs = arm64-v8a
 
-# App icon
+# App icon — foreground (your image) + dark background so Android doesn't use white
 icon.filename = %(source.dir)s/icon.png
+android.icon.adaptive_foreground.filename = %(source.dir)s/icon.png
+android.icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
 
-# Presplash — shown before Kivy initialises
-presplash.filename = %(source.dir)s/icon.png
+# Presplash — solid dark colour only, no image
 presplash.color = #0f0f0f
 
 # Keep Python .pyc files out of the APK source
