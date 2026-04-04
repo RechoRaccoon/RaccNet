@@ -18,7 +18,7 @@ entrypoint = main.py
 requirements = python3==3.11.0,kivy==2.3.0,pyjnius,android
 
 # Orientation: support both so rotating to landscape works
-orientation = all
+orientation = sensor
 
 # Android permissions
 android.permissions = INTERNET, ACCESS_NETWORK_STATE
