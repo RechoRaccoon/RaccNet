@@ -7906,6 +7906,12 @@ function App() {
     requestAnimationFrame(function(){requestAnimationFrame(function(){window.scrollTo(0,targetScroll);});});
   }, []);
 
+  // expose nav functions so Android back gesture can trigger them
+  useEffect(function(){
+    window.raccnetNavBack = navBack;
+    window.raccnetNavForward = navForward;
+  }, []);
+
   // ── Upload logic (lives at App level — persists across navigation) ────────────
   async function startUpload(sess, opts) {
     const {videoFile, thumbFile, title, desc, videoAspect, splitPartCount} = opts;

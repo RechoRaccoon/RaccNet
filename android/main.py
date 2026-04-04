@@ -90,13 +90,22 @@ if platform == 'android':
             _server_error[0] = '[WebView error]\n' + traceback.format_exc()
             print(f"[RaccNet] WebView error: {e}")
 
+    @run_on_ui_thread
+    def _raccnet_nav_back():
+        """Call RaccNet's own back function via JS (same as the header back button)."""
+        if _webview is not None:
+            _webview.evaluateJavascript(
+                'if(typeof window.raccnetNavBack==="function")'
+                '{window.raccnetNavBack();}',
+                None
+            )
+
     def _handle_back(window, key, *args):
-        """Override Android back button to navigate WebView history."""
+        """Android back button / swipe → RaccNet's back navigation."""
         if key == 27 and _webview is not None:  # 27 = back key
-            if _webview.canGoBack():
-                _webview.goBack()
-                return True   # consumed — don't exit app
-        return False           # not consumed — default (exit app)
+            _raccnet_nav_back()
+            return True   # always consumed — never exits app on back
+        return False
 
     from kivy.core.window import Window
     Window.bind(on_keyboard=_handle_back)
