@@ -12,7 +12,9 @@ import os
 import sys
 
 from kivy.app import App
+from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.widget import Widget
 from kivy.uix.label import Label
 from kivy.uix.image import Image as KivyImage
 from kivy.uix.scrollview import ScrollView
@@ -94,10 +96,9 @@ if platform == 'android':
     def _raccnet_nav_back():
         """Call RaccNet's own back function via JS (same as the header back button)."""
         if _webview is not None:
-            _webview.evaluateJavascript(
-                'if(typeof window.raccnetNavBack==="function")'
-                '{window.raccnetNavBack();}',
-                None
+            _webview.loadUrl(
+                'javascript:if(typeof window.raccnetNavBack==="function")'
+                '{window.raccnetNavBack();}'
             )
 
     def _handle_back(window, key, *args):
@@ -115,40 +116,55 @@ if platform == 'android':
 class LoadingScreen(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(orientation='vertical', **kwargs)
-        self.canvas.before.clear()
         from kivy.graphics import Color as KColor, Rectangle
         with self.canvas.before:
             KColor(rgba=(15/255, 15/255, 15/255, 1))   # #0f0f0f
             self._bg = Rectangle(pos=self.pos, size=self.size)
         self.bind(pos=self._update_bg, size=self._update_bg)
 
-        # Logo row: raccoon icon + "RaccNet" text side by side
-        logo_row = BoxLayout(orientation='horizontal', size_hint=(1, 0.3),
-                             spacing=14, padding=[0, 0, 0, 0])
-        logo_row.bind(size=self._center_logo_row)
-
         import os
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.png')
-        logo_img = KivyImage(source=icon_path, size_hint=(None, 1), width=64,
-                             allow_stretch=True, keep_ratio=True)
+
+        # Top spacer
+        self.add_widget(Widget(size_hint=(1, 0.35)))
+
+        # Centered logo area
+        anchor = AnchorLayout(anchor_x='center', anchor_y='center', size_hint=(1, 0.25))
+        logo_row = BoxLayout(
+            orientation='horizontal',
+            size_hint=(None, None),
+            size=(286, 72),
+            spacing=14,
+        )
+        logo_img = KivyImage(
+            source=icon_path,
+            size_hint=(None, None),
+            size=(64, 64),
+            allow_stretch=True,
+            keep_ratio=True,
+            nocache=True,
+        )
         self._title = Label(
             text='[color=#00FF07]Racc[/color][color=#f1f1f1]Net[/color]',
             markup=True,
             font_size='36sp',
             bold=True,
-            size_hint=(None, 1),
-            width=200,
+            size_hint=(None, None),
+            size=(208, 72),
             halign='left',
             valign='middle',
+            text_size=(208, 72),   # fixed — prevents word-wrap
         )
-        self._title.bind(size=self._title.setter('text_size'))
         logo_row.add_widget(logo_img)
         logo_row.add_widget(self._title)
+        anchor.add_widget(logo_row)
+        self.add_widget(anchor)
+
         self._status = Label(
             text='[color=#555555]Starting…[/color]',
             markup=True,
             font_size='14sp',
-            size_hint=(1, 0.2),
+            size_hint=(1, 0.12),
         )
         self._error_label = Label(
             text='',
@@ -156,14 +172,14 @@ class LoadingScreen(BoxLayout):
             font_size='11sp',
             color=(1, 0.3, 0.3, 1),
             size_hint=(1, None),
+            height=0,
             text_size=(None, None),
             halign='left',
             valign='top',
         )
-        scroll = ScrollView(size_hint=(1, 0.5))
+        scroll = ScrollView(size_hint=(1, 0.28))
         scroll.add_widget(self._error_label)
 
-        self.add_widget(logo_row)
         self.add_widget(self._status)
         self.add_widget(scroll)
 
@@ -172,11 +188,6 @@ class LoadingScreen(BoxLayout):
         self._error_label.text = msg
         self._error_label.texture_update()
         self._error_label.height = self._error_label.texture_size[1] + 20
-
-    def _center_logo_row(self, instance, size):
-        # Keep the logo row contents centered horizontally
-        total = 64 + 14 + 200  # img + spacing + label
-        instance.padding = [max(0, (size[0] - total) / 2), 0, 0, 0]
 
     def _update_bg(self, *_):
         self._bg.pos  = self.pos

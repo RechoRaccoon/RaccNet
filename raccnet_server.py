@@ -6930,6 +6930,7 @@ function StarterPackView(props) {
 
 // ── Channel Page ──────────────────────────────────────────────────────────────
 function ChannelPage(props) {
+  const portrait = usePortrait();
   const actor = props.actor;
   const [tab,         setTab]         = useState(props.initialTab || 'Content');
   const [contentSub,  setContentSub]  = useState('Videos');
@@ -7519,22 +7520,95 @@ function ChannelPage(props) {
       overflow:'hidden'}}>
       ${d.banner?html`<img src=${d.banner} alt="" style=${{width:'100%',maxHeight:320,objectFit:'cover',display:'block'}}/>`:html`<div style=${{height:240}}/>`}
     </div>
-    <div style=${{padding:'0 24px',borderBottom:'1px solid var(--accent)'}}>
-      <div style=${{display:'flex',alignItems:'center',gap:20,padding:'20px 0 20px'}}>
-        <${Avatar} src=${d.avatar} size=${80}/>
+    <div style=${{padding:portrait?'0 12px':'0 24px',borderBottom:'1px solid var(--accent)'}}>
+      <div style=${{display:'flex',alignItems:portrait?'flex-start':'center',gap:portrait?10:20,padding:'20px 0 20px'}}>
+        <div style=${{display:'flex',flexDirection:'column',alignItems:'center',gap:portrait?6:0,flexShrink:0}}>
+          <${Avatar} src=${d.avatar} size=${portrait?64:80}/>
+          ${portrait?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'stretch',gap:4,width:64}}>
+            ${isOwn
+              ? html`<button onClick=${function(){setShowEdit(true);}}
+                  style=${{background:'#1a1a1a',border:'1px solid var(--accent)',color:'var(--accent)',padding:'5px 6px',
+                    fontWeight:600,fontSize:11,cursor:'pointer',borderRadius:0,transition:'background 0.15s',textAlign:'center'}}
+                  onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';}}
+                  onMouseLeave=${function(e){e.currentTarget.style.background='#1a1a1a';}}>
+                  ✏ Edit
+                </button>`
+              : html`<${SubscribeButton} did=${d.did} viewer=${d.viewer} session=${props.session}/>`
+            }
+            ${!isOwn?html`<div style=${{position:'relative'}}>
+              <button onClick=${function(){setChanMenuOpen(function(o){return !o;});if(!chanMenuOpen){setChanListMenu(false);setChanListMsg('');}}}
+                style=${{background:chanMenuOpen?'var(--accent-dim)':'none',border:'1px solid var(--accent)',color:'var(--accent)',
+                  padding:'5px 8px',cursor:'pointer',borderRadius:0,display:'flex',alignItems:'center',justifyContent:'center',width:'100%',
+                  transition:'background 0.12s'}}
+                onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';}}
+                onMouseLeave=${function(e){if(!chanMenuOpen)e.currentTarget.style.background='none';}}
+                title="More options">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+              </button>
+              ${chanMenuOpen?html`<div style=${{position:'absolute',top:'calc(100% + 4px)',left:0,background:'#1a1a1a',
+                border:'1px solid var(--accent)',minWidth:200,zIndex:600,boxShadow:'0 4px 20px rgba(0,0,0,0.8)'}}>
+                <a href=${'https://bsky.app/profile/'+(d.handle||d.did)} target="_blank" rel="noopener noreferrer"
+                  style=${{display:'block',width:'100%',padding:'10px 14px',background:chanMenuHov==='bsky'?'var(--accent-dim)':'none',
+                    borderLeft:chanMenuHov==='bsky'?'2px solid var(--accent)':'2px solid transparent',
+                    color:'var(--accent)',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',
+                    textDecoration:'none',boxSizing:'border-box'}}
+                  onMouseEnter=${function(){setChanMenuHov('bsky');}} onMouseLeave=${function(){setChanMenuHov('');}}>
+                  View on Bluesky ↗
+                </a>
+                <button onClick=${chanShare}
+                  style=${{display:'block',width:'100%',padding:'10px 14px',background:chanMenuHov==='share'?'var(--accent-dim)':'none',
+                    border:'none',borderLeft:chanMenuHov==='share'?'2px solid var(--accent)':'2px solid transparent',
+                    color:'var(--accent)',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif'}}
+                  onMouseEnter=${function(){setChanMenuHov('share');}} onMouseLeave=${function(){setChanMenuHov('');}}>
+                  Share Channel
+                </button>
+                ${sess?html`<div style=${{position:'relative'}}>
+                  <button onClick=${function(){setChanListMenu(function(o){return !o;});if(!chanListMenu)loadChanLists();}}
+                    style=${{display:'block',width:'100%',padding:'10px 14px',background:chanMenuHov==='list'?'var(--accent-dim)':'none',
+                      border:'none',borderLeft:chanMenuHov==='list'?'2px solid var(--accent)':'2px solid transparent',
+                      color:'var(--accent)',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif'}}
+                    onMouseEnter=${function(){setChanMenuHov('list');}} onMouseLeave=${function(){setChanMenuHov('');}}>
+                    Add to List ›
+                  </button>
+                  ${chanListMenu?html`<div style=${{position:'absolute',top:0,left:'100%',marginLeft:4,background:'#1a1a1a',
+                    border:'1px solid var(--accent)',minWidth:180,zIndex:601,boxShadow:'0 4px 20px rgba(0,0,0,0.8)',maxHeight:240,overflowY:'auto'}}>
+                    ${chanListMsg?html`<div style=${{padding:'6px 12px',fontSize:12,color:'var(--accent)'}}>${chanListMsg}</div>`:null}
+                    ${chanListsLoading?html`<div style=${{padding:'10px 14px',color:'#aaa',fontSize:12}}>Loading…</div>`:null}
+                    ${chanLists&&chanLists.length===0?html`<div style=${{padding:'10px 14px',color:'#555',fontSize:12}}>No lists yet.</div>`:null}
+                    ${(chanLists||[]).map(function(l,li){return html`<button key=${l.uri}
+                      onClick=${function(){addChanToList(l.uri);}}
+                      style=${{display:'block',width:'100%',padding:'9px 14px',background:'none',border:'none',
+                        borderLeft:'2px solid transparent',color:'var(--accent)',fontSize:13,cursor:'pointer',
+                        textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
+                      onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';e.currentTarget.style.borderLeftColor='var(--accent)';}}
+                      onMouseLeave=${function(e){e.currentTarget.style.background='none';e.currentTarget.style.borderLeftColor='transparent';}}>
+                      ${l.name||'Unnamed List'}
+                    </button>`;})}</div>`:null}
+                </div>`:null}
+                ${sess?html`<button onClick=${chanBlockToggle}
+                  style=${{display:'block',width:'100%',padding:'10px 14px',background:chanMenuHov==='block'?'rgba(244,68,68,0.12)':'none',
+                    border:'none',borderLeft:chanMenuHov==='block'?'2px solid #f44':'2px solid transparent',
+                    color:'#f87171',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif'}}
+                  onMouseEnter=${function(){setChanMenuHov('block');}} onMouseLeave=${function(){setChanMenuHov('');}}>
+                  ${chanBlockLoading?'Please wait…':chanBlocked?'Unblock @'+d.handle:'Block @'+d.handle}
+                </button>`:null}
+              </div>`:null}
+            </div>`:null}
+          </div>`:null}
+        </div>
         <div style=${{flex:1,minWidth:0}}>
-          <h1 style=${{color:'#f1f1f1',fontSize:24,fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',gap:10}}>
+          <h1 style=${{color:'#f1f1f1',fontSize:portrait?18:24,fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',gap:10}}>
             ${d.displayName||d.handle}
             ${!isOwn&&sess&&d.viewer&&d.viewer.following&&d.viewer.followedBy?html`<span style=${{fontSize:13,fontWeight:600,color:'var(--accent)',border:'1px solid var(--accent)',padding:'2px 8px',letterSpacing:0.5}}>Friends</span>`:null}
           </h1>
-          <div style=${{color:'#aaa',fontSize:14}}>@${d.handle} · ${fmt(d.followersCount||0)} subscribers · <span
+          <div style=${{color:'#aaa',fontSize:portrait?12:14}}>@${d.handle} · ${fmt(d.followersCount||0)} subscribers · <span
             style=${{color:'var(--accent)',cursor:'pointer'}}
             onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>
             ${fmt(d.followsCount||0)} subscriptions
           </span> · ${channelVideos.length} videos</div>
-          ${d.description?html`<div style=${{color:'#aaa',fontSize:13,marginTop:6,maxWidth:600,lineHeight:1.6}}>${renderMarkdown(d.description.slice(0,400)+(d.description.length>400?'…':''), props.onChannel, triggerSearch)}</div>`:null}
+          ${d.description?html`<div style=${{color:'#aaa',fontSize:portrait?12:13,marginTop:6,lineHeight:1.6}}>${renderMarkdown(d.description.slice(0,400)+(d.description.length>400?'…':''), props.onChannel, triggerSearch)}</div>`:null}
         </div>
-        <div style=${{display:'flex',alignItems:'center',gap:8}}>
+        ${!portrait?html`<div style=${{display:'flex',alignItems:'center',gap:8}}>
           ${isOwn
             ? html`<button onClick=${function(){setShowEdit(true);}}
                 style=${{background:'#1a1a1a',border:'1px solid var(--accent)',color:'var(--accent)',padding:'10px 20px',
@@ -7604,10 +7678,10 @@ function ChannelPage(props) {
               </button>`:null}
             </div>`:null}
           </div>`:null}
-        </div>
+        </div>`:null}
       </div>
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-        <div style=${{display:'flex'}}>
+        <div style=${{display:'flex',overflowX:portrait?'auto':'visible',scrollbarWidth:'none',msOverflowStyle:'none',flex:1,minWidth:0}}>
           ${(function(){
             var tabs = ['Content','Reposts','Liked'];
             if (sess&&!isOwn&&hasDMs) tabs.push('DMs');
@@ -7616,8 +7690,8 @@ function ChannelPage(props) {
             if (channelFeeds&&channelFeeds.length) tabs.push('Feeds');
             if (channelStPacks&&channelStPacks.length) tabs.push('Starter Packs');
             return tabs.map(function(t){return html`<button key=${t} onClick=${function(){openTab(t);}}
-              style=${{padding:'12px 20px',background:'none',border:'none',color:tab===t?'var(--accent)':'#aaa',
-                fontSize:14,fontWeight:tab===t?500:400,borderBottom:'3px solid '+(tab===t?'var(--accent)':'transparent'),cursor:'pointer'}}>${t}</button>`;});
+              style=${{padding:portrait?'10px 14px':'12px 20px',background:'none',border:'none',color:tab===t?'var(--accent)':'#aaa',
+                fontSize:portrait?13:14,fontWeight:tab===t?500:400,borderBottom:'3px solid '+(tab===t?'var(--accent)':'transparent'),cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>${t}</button>`;});
           })()}
         </div>
         ${(tab==='Content'||tab==='Reposts')?html`<div style=${{display:'flex',alignItems:'center',gap:4,marginRight:8}}>

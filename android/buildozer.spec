@@ -34,8 +34,8 @@ android.archs = arm64-v8a
 # App icon
 icon.filename = %(source.dir)s/icon.png
 
-# Presplash (optional — place a presplash.png here)
-# presplash.filename = %(source.dir)s/presplash.png
+# Presplash — shown before Kivy initialises
+presplash.filename = %(source.dir)s/icon.png
 presplash.color = #0f0f0f
 
 # Keep Python .pyc files out of the APK source
