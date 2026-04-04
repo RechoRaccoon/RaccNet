@@ -6,6 +6,7 @@ RaccNet Android entrypoint
 """
 
 import threading
+import traceback
 import time
 import os
 import sys
@@ -13,11 +14,13 @@ import sys
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
+from kivy.uix.scrollview import ScrollView
 from kivy.clock import Clock
 from kivy.utils import platform
 
 # ── Start the RaccNet server in a background daemon thread ──────────────────
 _server_ready = threading.Event()
+_server_error = [None]   # mutable container so thread can write to it
 
 def _start_server():
     try:
@@ -30,6 +33,7 @@ def _start_server():
         raccnet_server.ThreadedHTTPServer.serve_forever = patched_serve
         raccnet_server.run_server()
     except Exception as e:
+        _server_error[0] = traceback.format_exc()
         print(f"[RaccNet] Server error: {e}")
         _server_ready.set()  # unblock UI even on error
 
@@ -54,33 +58,35 @@ if platform == 'android':
     @run_on_ui_thread
     def _attach_webview():
         global _webview
-        activity = PythonActivity.mActivity
+        try:
+            activity = PythonActivity.mActivity
 
-        wv = WebView(activity)
-        _webview = wv
+            wv = WebView(activity)
+            _webview = wv
 
-        # Settings
-        s = wv.getSettings()
-        s.setJavaScriptEnabled(True)
-        s.setDomStorageEnabled(True)
-        s.setMediaPlaybackRequiresUserGesture(False)
-        s.setAllowFileAccessFromFileURLs(True)
-        s.setAllowUniversalAccessFromFileURLs(True)
-        s.setLoadWithOverviewMode(True)
-        s.setUseWideViewPort(True)
-        s.setBuiltInZoomControls(False)
-        s.setSupportZoom(False)
+            # Settings
+            s = wv.getSettings()
+            s.setJavaScriptEnabled(True)
+            s.setDomStorageEnabled(True)
+            s.setMediaPlaybackRequiresUserGesture(False)
+            s.setLoadWithOverviewMode(True)
+            s.setUseWideViewPort(True)
+            s.setBuiltInZoomControls(False)
+            s.setSupportZoom(False)
 
-        # Keep navigation inside the WebView (no external browser)
-        wv.setWebViewClient(WebViewClient())
-        wv.setWebChromeClient(WebChromeClient())
-        wv.setBackgroundColor(Color.parseColor('#0f0f0f'))
+            # Keep navigation inside the WebView (no external browser)
+            wv.setWebViewClient(WebViewClient())
+            wv.setWebChromeClient(WebChromeClient())
+            wv.setBackgroundColor(Color.parseColor('#0f0f0f'))
 
-        # Full-screen overlay on top of the Kivy surface
-        params = FrameLayout.LayoutParams(LP.MATCH_PARENT, LP.MATCH_PARENT)
-        activity.addContentView(wv, params)
+            # Full-screen overlay on top of the Kivy surface
+            params = FrameLayout.LayoutParams(LP.MATCH_PARENT, LP.MATCH_PARENT)
+            activity.addContentView(wv, params)
 
-        wv.loadUrl('http://localhost:8080')
+            wv.loadUrl('http://localhost:8080')
+        except Exception as e:
+            _server_error[0] = '[WebView error]\n' + traceback.format_exc()
+            print(f"[RaccNet] WebView error: {e}")
 
     def _handle_back(window, key, *args):
         """Override Android back button to navigate WebView history."""
@@ -105,19 +111,41 @@ class LoadingScreen(BoxLayout):
             self._bg = Rectangle(pos=self.pos, size=self.size)
         self.bind(pos=self._update_bg, size=self._update_bg)
 
-        self.add_widget(Label(
+        self._title = Label(
             text='[color=#00FF07]Racco[/color][color=#f1f1f1]Net[/color]',
             markup=True,
             font_size='32sp',
             bold=True,
-            size_hint=(1, 0.6),
-        ))
-        self.add_widget(Label(
+            size_hint=(1, 0.3),
+        )
+        self._status = Label(
             text='[color=#555555]Starting…[/color]',
             markup=True,
             font_size='14sp',
-            size_hint=(1, 0.4),
-        ))
+            size_hint=(1, 0.2),
+        )
+        self._error_label = Label(
+            text='',
+            markup=False,
+            font_size='11sp',
+            color=(1, 0.3, 0.3, 1),
+            size_hint=(1, None),
+            text_size=(None, None),
+            halign='left',
+            valign='top',
+        )
+        scroll = ScrollView(size_hint=(1, 0.5))
+        scroll.add_widget(self._error_label)
+
+        self.add_widget(self._title)
+        self.add_widget(self._status)
+        self.add_widget(scroll)
+
+    def set_error(self, msg):
+        self._status.text = '[color=#FF4444]Error — see below[/color]'
+        self._error_label.text = msg
+        self._error_label.texture_update()
+        self._error_label.height = self._error_label.texture_size[1] + 20
 
     def _update_bg(self, *_):
         self._bg.pos  = self.pos
@@ -135,13 +163,22 @@ class RaccNetApp(App):
     def _check_ready(self, dt):
         if _server_ready.is_set():
             Clock.unschedule(self._check_ready)
+            if _server_error[0]:
+                self._screen.set_error(_server_error[0])
+                return
             if platform == 'android':
                 # Small extra delay so the server socket is fully open
                 Clock.schedule_once(lambda dt: _attach_webview(), 0.5)
+                # Check for WebView errors a moment later
+                Clock.schedule_once(self._check_webview_error, 3.0)
             else:
                 # Desktop fallback: open in system browser
                 import webbrowser
                 webbrowser.open('http://localhost:8080')
+
+    def _check_webview_error(self, dt):
+        if _server_error[0]:
+            self._screen.set_error(_server_error[0])
 
     def on_pause(self):
         return True   # keep server running when app is backgrounded
