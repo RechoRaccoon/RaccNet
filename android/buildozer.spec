@@ -9,7 +9,7 @@ version = 1.0
 # Source
 source.dir = .
 source.include_exts = py
-source.include_patterns = raccnet_server.py, main.py, icon.png, icon_bg.png
+source.include_patterns = raccnet_server.py, main.py, icon.png, icon_bg.png, presplash.png
 
 # Entry point
 entrypoint = main.py
@@ -36,8 +36,8 @@ icon.filename = %(source.dir)s/icon.png
 android.icon.adaptive_foreground.filename = %(source.dir)s/icon.png
 android.icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
 
-# Presplash — solid dark image so Kivy's default logo/spinner never appears
-presplash.filename = %(source.dir)s/icon_bg.png
+# Presplash — shown before Kivy starts
+presplash.filename = %(source.dir)s/presplash.png
 presplash.color = #0f0f0f
 
 # Keep Python .pyc files out of the APK source
