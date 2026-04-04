@@ -36,7 +36,8 @@ icon.filename = %(source.dir)s/icon.png
 android.icon.adaptive_foreground.filename = %(source.dir)s/icon.png
 android.icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
 
-# Presplash — solid dark colour only, no image
+# Presplash — solid dark image so Kivy's default logo/spinner never appears
+presplash.filename = %(source.dir)s/icon_bg.png
 presplash.color = #0f0f0f
 
 # Keep Python .pyc files out of the APK source
