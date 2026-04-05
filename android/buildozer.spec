@@ -9,7 +9,7 @@ version = 1.0
 # Source
 source.dir = .
 source.include_exts = py
-source.include_patterns = raccnet_server.py, main.py, icon.png, icon_bg.png, presplash.png, network_security_config.xml
+source.include_patterns = raccnet_server.py, main.py, icon.png, icon_bg.png, presplash.png
 
 # Hook to patch AndroidManifest for cleartext HTTP to localhost (Android 9+)
 p4a.hook = raccnet_hook.py
