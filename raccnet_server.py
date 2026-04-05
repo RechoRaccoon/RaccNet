@@ -2185,7 +2185,21 @@ function FriendsFeed(props) {
             // Also check link-card embeds for profile URLs
             var embedExtUri=(et==='app.bsky.embed.external'||et==='app.bsky.embed.external#view')
               ?((embed.external&&embed.external.uri)||''):'';
-            var searchText=(m.text||'')+' '+embedExtUri;
+            // Extract full URIs from facets — Bluesky shortens links visually but
+            // stores the full URL in facet features, so we must check there too.
+            // Only link facets have a .uri field (mention facets use .did, tags use .tag)
+            // so checking feat.uri without a $type guard is safe and more robust.
+            var facetUris='';
+            if(m.facets&&Array.isArray(m.facets)){
+              m.facets.forEach(function(facet){
+                (facet.features||[]).forEach(function(feat){
+                  if(feat.uri) facetUris+=' '+feat.uri;
+                });
+              });
+            }
+            // Facet URIs go first so the regex prefers the full URL over any
+            // visually-truncated text (e.g. "bsky.app/profile/chik...").
+            var searchText=facetUris+' '+(m.text||'')+' '+embedExtUri;
             // Check for playlist AT URIs
             var listMatch2=searchText.match(/at:\/\/(did:[^/\s]+)\/app\.bsky\.graph\.list\/([a-zA-Z0-9]+)/);
             // Check for profile URLs (not post URLs)
@@ -2212,8 +2226,12 @@ function FriendsFeed(props) {
             }
             // Profile URL — not a post link (independent of playlist check)
             if(profileMatch&&!profileIsPost){
-              found.push({sender:convoOther,msgText:m.text||'',postUri:null,sentAt:m.sentAt||'',_type:'channel',handle:profileMatch[1]});
-              anySpecific=true;
+              var rawHandle=profileMatch[1];
+              // Skip handles ending with '...' — facets were missing so we have no full URL
+              if(!/\.\.\.$/.test(rawHandle)){
+                found.push({sender:convoOther,msgText:m.text||'',postUri:null,sentAt:m.sentAt||'',_type:'channel',handle:rawHandle});
+                anySpecific=true;
+              }
             }
             // Plain text / image / other embed only if nothing specific matched
             if(!anySpecific){
@@ -2437,29 +2455,7 @@ function FriendsFeed(props) {
               </div>
             </div>`;
           }
-          if(entry._gt==='channel'){
-            var cp=entry.item.profile, csender=entry.item.sender||{};
-            return html`<div key=${'c'+i} style=${{cursor:'pointer',background:'#141414',outline:'2px solid transparent',transition:'outline 0.15s'}}
-              onMouseEnter=${function(e){e.currentTarget.style.outline='2px solid var(--accent)';}}
-              onMouseLeave=${function(e){e.currentTarget.style.outline='2px solid transparent';}}
-              onClick=${function(){props.onChannel&&props.onChannel(cp.handle);}}>
-              <div style=${{width:'100%',paddingBottom:'56.25%',position:'relative',background:'#0a0a0a',overflow:'hidden'}}>
-                <div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:10}}>
-                  <${Avatar} src=${cp.avatar} size=${72}/>
-                  <div style=${{color:'#f1f1f1',fontSize:14,fontWeight:700,textAlign:'center',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${cp.displayName||cp.handle}</div>
-                </div>
-                <div style=${{position:'absolute',bottom:6,left:6,background:'rgba(0,0,0,0.8)',color:'var(--accent)',fontSize:10,padding:'2px 6px',opacity:0.85}}>Channel</div>
-              </div>
-              <div style=${{padding:'10px 12px 12px'}}>
-                <div style=${{color:'#888',fontSize:12,marginBottom:4,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>@${cp.handle}</div>
-                <div style=${{display:'flex',alignItems:'center',gap:6}}>
-                  <${Avatar} src=${csender.avatar} size=${20} onClick=${function(e){e.stopPropagation();props.onChannel&&props.onChannel(csender.handle);}}/>
-                  <span style=${{color:'#555',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>from ${csender.displayName||csender.handle}</span>
-                  <span style=${{color:'#444',fontSize:11,marginLeft:'auto',flexShrink:0}}>${ago(entry.sentAt)}</span>
-                </div>
-              </div>
-            </div>`;
-          }
+          if(entry._gt==='channel') return html`<${ChannelFriendCard} key=${'c'+i} entry=${entry} onChannel=${props.onChannel}/>`;
           return null;
         }):html`<div style=${{padding:'32px 0',color:'#555',fontSize:14,gridColumn:'1/-1'}}>No videos shared with you yet.</div>`}
       </div>`;
@@ -2522,6 +2518,48 @@ function FriendCard(props) {
         <div style=${{fontSize:13,color:'#aaa',marginTop:4}}>${author.displayName||author.handle}</div>
         <div style=${{fontSize:13,color:'#aaa'}}>${fmt(post.likeCount||0)} likes · ${ago(post.indexedAt)}</div>
       </div>
+    </div>
+  </div>`;
+}
+
+
+function ChannelFriendCard(props) {
+  var entry=props.entry;
+  var cp=entry.item.profile||{}, csender=entry.item.sender||{};
+  var msgText=(entry.item.msgText||'').trim();
+  // Strip profile URL from display — redundant since we show the channel card
+  var displayText=msgText.replace(/(https?:\/\/)?bsky\.app\/profile\/[^\s]*/gi,'').trim();
+  var MAX=60, needsMore=displayText.length>MAX;
+  var short=displayText.slice(0,MAX)+(needsMore?'...':'');
+  const [open,setOpen]=useState(false);
+  const [hov,setHov]=useState(false);
+  return html`<div style=${{cursor:'pointer'}}>
+    <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:6,height:34,overflow:'hidden'}}>
+      <${Avatar} src=${csender.avatar} size=${26}
+        onClick=${function(e){e.stopPropagation();props.onChannel&&props.onChannel(csender.handle);}}/>
+      <span style=${{color:'#e0e0e0',fontSize:12,fontWeight:600,flexShrink:0}}>${csender.displayName||csender.handle||'Unknown'}</span>
+      ${displayText?html`<span style=${{color:'#888',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1,minWidth:0}}>${open?'':short}</span>`:html`<span style=${{flex:1}}></span>`}
+      ${needsMore?html`<span onClick=${function(e){e.stopPropagation();setOpen(function(v){return !v;});}} style=${{color:'var(--accent)',fontSize:11,fontWeight:600,cursor:'pointer',flexShrink:0,marginLeft:4}}>${open?'Close':'Expand'}</span>`:null}
+      <span style=${{color:'#444',fontSize:11,flexShrink:0,marginLeft:4}}>${ago(entry.sentAt)}</span>
+    </div>
+    <div style=${{width:'100%',paddingBottom:'56.25%',position:'relative'}}
+      onMouseEnter=${function(){setHov(true);}} onMouseLeave=${function(){setHov(false);}}
+      onClick=${function(){props.onChannel&&props.onChannel(cp.handle);}}>
+      <div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+        ${cp.avatar
+          ?html`<img src=${cp.avatar} style=${{height:'100%',aspectRatio:'1/1',borderRadius:'50%',objectFit:'cover',display:'block',flexShrink:0,
+            boxShadow:hov?'0 0 0 3px var(--accent)':'0 0 0 3px transparent',transition:'box-shadow 0.15s'}}/>`
+          :html`<div style=${{height:'80%',aspectRatio:'1/1',borderRadius:'50%',background:'#3f3f3f',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'3rem',color:'#aaa',fontWeight:600,
+            boxShadow:hov?'0 0 0 3px var(--accent)':'0 0 0 3px transparent',transition:'box-shadow 0.15s'}}>${(cp.displayName||cp.handle||'?')[0].toUpperCase()}</div>`}
+      </div>
+      ${open?html`<div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,
+        background:'rgba(0,0,0,0.88)',overflowY:'auto',padding:14,zIndex:2,boxSizing:'border-box'}}
+        onClick=${function(e){e.stopPropagation();}}>
+        <p style=${{color:'#f1f1f1',fontSize:13,lineHeight:1.65,margin:0,wordBreak:'break-word'}}>${displayText||msgText}</p>
+      </div>`:null}
+    </div>
+    <div style=${{paddingTop:10,textAlign:'center'}}>
+      <div style=${{color:'#f1f1f1',fontSize:14,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${cp.displayName||cp.handle}</div>
     </div>
   </div>`;
 }
@@ -3907,6 +3945,380 @@ async function countCrossUserDislikes(sess,postUri,listName){
 }
 var _dislikeCountCache={};
 
+// ── Debounced number input (isolated component so spinner doesn't freeze parent) ──
+function NumInput(props) {
+  var timerRef = useRef(null);
+  var prevProp = useRef(props.value);
+  var [display, setDisplay] = useState(String(props.value));
+  // Sync when parent pushes a new value (e.g. /gif-info response)
+  if (props.value !== prevProp.current) {
+    prevProp.current = props.value;
+    setDisplay(String(props.value));
+  }
+  function commit(raw) {
+    var n = parseFloat(raw);
+    if (isNaN(n)) return;
+    n = Math.max(props.min, Math.min(props.max, n));
+    props.onChange(n);
+  }
+  var st = {background:'#111',border:'1px solid #333',color:'#f1f1f1',padding:'6px 10px',
+             fontSize:13,outline:'none',width:'100%',boxSizing:'border-box',fontFamily:'Roboto,sans-serif'};
+  return html`<input type="number" min=${props.min} max=${props.max} step=${props.step||1}
+    value=${display}
+    onInput=${function(e){
+      setDisplay(e.target.value);
+      clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(function(){ commit(e.target.value); }, 150);
+    }}
+    onBlur=${function(e){
+      clearTimeout(timerRef.current);
+      commit(e.target.value);
+      e.currentTarget.style.borderColor='#333';
+    }}
+    onFocus=${function(e){ e.currentTarget.style.borderColor='var(--accent)'; }}
+    style=${st}/>`;
+}
+
+// ── GIF Maker Modal ───────────────────────────────────────────────────────────
+function GifMakerModal(props) {
+  const playlist = props.playlist;
+  const [fps, setFps] = useState(15);
+  const [gifWidth, setGifWidth] = useState(480);
+  const [infoLoaded, setInfoLoaded] = useState(false);
+  const [cropLeft, setCropLeft] = useState(0);
+  const [cropRight, setCropRight] = useState(0);
+  const [cropTop, setCropTop] = useState(0);
+  const [cropBottom, setCropBottom] = useState(0);
+  const [addText, setAddText] = useState(false);
+  const [gifText, setGifText] = useState('');
+  const [textBoxH,   setTextBoxH]   = useState(function(){ return parseInt(localStorage.getItem('raccnet_gif_textboxh')  ||'40')||40;  });
+  const [textSize,   setTextSize]   = useState(function(){ return parseInt(localStorage.getItem('raccnet_gif_textsize')   ||'16')||16;  });
+  const [textWeight, setTextWeight] = useState(function(){ return parseFloat(localStorage.getItem('raccnet_gif_textweight') ||'0') ||0;   });
+  useEffect(function(){ localStorage.setItem('raccnet_gif_textboxh',  String(textBoxH));   }, [textBoxH]);
+  useEffect(function(){ localStorage.setItem('raccnet_gif_textsize',  String(textSize));   }, [textSize]);
+  useEffect(function(){ localStorage.setItem('raccnet_gif_textweight',String(textWeight)); }, [textWeight]);
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd,   setTrimEnd]   = useState(0);   // 0 = full video
+  const [vidDuration, setVidDuration] = useState(0);
+  const [vidNatW, setVidNatW] = useState(0);
+  const [vidNatH, setVidNatH] = useState(0);
+  const [previewDims, setPreviewDims] = useState(null); // {w,h} in px — locked on first video meta
+  const [making, setMaking] = useState(false);
+  const [error, setError] = useState('');
+  const [dragging, setDragging] = useState(null);
+  const cropRef = useRef(null);
+  const videoRef = useRef(null);
+  const hlsRef = useRef(null);
+  const leftPanelRef = useRef(null);
+
+  // Fetch video info (width, fps) from server on open
+  useEffect(function() {
+    if (!playlist) return;
+    fetch('/gif-info?url=' + encodeURIComponent(playlist))
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){
+        if (d && d.width > 0) { setGifWidth(d.width); }
+        if (d && d.fps > 0)   { setFps(d.fps); }
+        setInfoLoaded(true);
+      })
+      .catch(function(){ setInfoLoaded(true); });
+  }, [playlist]);
+
+  // Set default gifWidth from video element on loadedmetadata as fallback
+  function onVideoMeta() {
+    if (!videoRef.current) return;
+    var v = videoRef.current;
+    if (!infoLoaded && v.videoWidth > 0) { setGifWidth(v.videoWidth); }
+    if (v.duration && isFinite(v.duration)) {
+      setVidDuration(Math.round(v.duration * 100) / 100);
+    }
+    if (v.videoWidth > 0 && v.videoHeight > 0) {
+      setVidNatW(v.videoWidth);
+      setVidNatH(v.videoHeight);
+      // Compute stable fixed pixel preview size from the left panel container.
+      // We do this once and lock it — prevents the layout feedback loop that
+      // causes the preview to oscillate in size on every re-render / HLS seek.
+      setPreviewDims(function(prev) {
+        if (prev) return prev; // already set — never update again
+        var panel = leftPanelRef.current;
+        var panelW = panel ? panel.clientWidth  - 16 : 600;
+        var panelH = panel ? panel.clientHeight - 16 : 500;
+        var aspect = v.videoWidth / v.videoHeight;
+        var w = panelW;
+        var h = Math.round(w / aspect);
+        if (h > panelH) { h = panelH; w = Math.round(h * aspect); }
+        w = Math.max(80, w);
+        h = Math.max(60, h);
+        return {w: w, h: h};
+      });
+    }
+  }
+
+  // Refs to avoid stale closures in time-update/ended handlers
+  var trimStartRef = useRef(trimStart);
+  var trimEndRef   = useRef(trimEnd);
+  useEffect(function() { trimStartRef.current = trimStart; }, [trimStart]);
+  useEffect(function() { trimEndRef.current   = trimEnd;   }, [trimEnd]);
+
+  // Seek preview to trimStart so the user sees what the GIF will start from
+  useEffect(function() {
+    if (videoRef.current && isFinite(videoRef.current.duration)) {
+      videoRef.current.currentTime = trimStart;
+    }
+  }, [trimStart]);
+
+  // Trim loop: when playback reaches trimEnd, loop back to trimStart
+  function onGifTimeUpdate() {
+    var v = videoRef.current;
+    if (!v) return;
+    var end = trimEndRef.current;
+    if (end > 0 && v.currentTime >= end) {
+      v.currentTime = trimStartRef.current;
+      v.play().catch(function(){});
+    }
+  }
+  function onGifEnded() {
+    var v = videoRef.current;
+    if (!v) return;
+    v.currentTime = trimStartRef.current;
+    v.play().catch(function(){});
+  }
+
+  useEffect(function() {
+    if (!playlist || !videoRef.current) return;
+    var active = true;
+    var timer = null;
+    function setup() {
+      if (!active) return;
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      if (window.Hls && window.Hls.isSupported()) {
+        var hls = new window.Hls({enableWorker:false});
+        hlsRef.current = hls;
+        hls.loadSource(playlist);
+        hls.attachMedia(videoRef.current);
+        hls.on(window.Hls.Events.MANIFEST_PARSED, function() {
+          if (!active || !videoRef.current) return;
+          var v = videoRef.current;
+          v.muted = true;
+          if (trimStartRef.current > 0) v.currentTime = trimStartRef.current;
+          v.play().catch(function(){});
+        });
+      } else if (videoRef.current) {
+        videoRef.current.src = playlist;
+        videoRef.current.muted = true;
+        if (trimStartRef.current > 0) videoRef.current.currentTime = trimStartRef.current;
+        videoRef.current.play().catch(function(){});
+      }
+    }
+    // Defer HLS init so the modal renders fully before heavy processing
+    timer = setTimeout(function() {
+      if (window.Hls) setup();
+      else if (videoRef.current) { videoRef.current.src = playlist; }
+    }, 0);
+    return function() {
+      active = false;
+      clearTimeout(timer);
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    };
+  }, [playlist]);
+
+  useEffect(function() {
+    if (!dragging) return;
+    function onMove(e) {
+      if (!cropRef.current) return;
+      var rect = cropRef.current.getBoundingClientRect();
+      var x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      var y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+      if (dragging === 'left')   setCropLeft(Math.min(x * 100, 49));
+      if (dragging === 'right')  setCropRight(Math.min((1 - x) * 100, 49));
+      if (dragging === 'top')    setCropTop(Math.min(y * 100, 49));
+      if (dragging === 'bottom') setCropBottom(Math.min((1 - y) * 100, 49));
+    }
+    function onUp() { setDragging(null); }
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    return function() { document.removeEventListener('pointermove', onMove); document.removeEventListener('pointerup', onUp); };
+  }, [dragging]);
+
+  async function makeGif() {
+    setMaking(true); setError('');
+    try {
+      var resp = await fetch('/make-gif', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          playlist_url: playlist,
+          fps: Math.max(1, Math.min(60, Math.round(fps))),
+          width: Math.max(64, Math.min(1920, Math.round(gifWidth))),
+          crop_left: cropLeft, crop_right: cropRight,
+          crop_top: cropTop, crop_bottom: cropBottom,
+          add_text: addText && gifText.trim().length > 0,
+          text: gifText.slice(0, 200),
+          text_box_height: Math.max(10, Math.min(400, Math.round(textBoxH))),
+          text_size: Math.max(6, Math.min(120, Math.round(textSize))),
+          text_weight: Math.max(0, Math.min(10, textWeight)),
+          trim_start: Math.max(0, trimStart),
+          trim_end:   Math.max(0, trimEnd)
+        })
+      });
+      if (!resp.ok) {
+        var d = await resp.json().catch(function(){return {};});
+        setError(d.error || 'Failed to create GIF (HTTP ' + resp.status + ')');
+        setMaking(false); return;
+      }
+      var blob = await resp.blob();
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'raccnet.gif';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch(e) { setError('Error: ' + e.message); }
+    setMaking(false);
+  }
+
+  var cl = cropLeft, cr = cropRight, ct = cropTop, cb = cropBottom;
+  var HS = 18;
+  // pvW: use the locked previewDims width — completely stable, never changes after first set.
+  // Falls back to gifWidth before the video metadata fires.
+  var pvW = previewDims ? previewDims.w : gifWidth;
+  var pvScale = pvW / Math.max(1, gifWidth);
+  var previewTextBoxH = Math.max(6, Math.round(textBoxH * pvScale));
+  // Hard pixel dimensions for the crop box — no aspect-ratio, no maxHeight, just fixed w/h.
+  var cropBoxW = previewDims ? previewDims.w + 'px' : '100%';
+  var cropBoxH = previewDims ? previewDims.h + 'px' : 'auto';
+  var labelSt = {fontSize:11,color:'#888',marginBottom:3,display:'block',letterSpacing:0.5};
+  var sectionSt = {marginBottom:14};
+
+  return html`<div onClick=${function(e){if(e.target===e.currentTarget)props.onClose();}}
+    style=${{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.92)',zIndex:4000,display:'flex',alignItems:'center',justifyContent:'center',padding:'16px',boxSizing:'border-box'}}>
+    <div style=${{background:'#141414',border:'1px solid var(--accent)',width:'100%',maxWidth:960,maxHeight:'95vh',display:'flex',flexDirection:'column',overflow:'hidden',boxShadow:'0 8px 40px rgba(0,0,0,0.8)'}}>
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 16px',borderBottom:'1px solid #222',flexShrink:0,background:'#0f0f0f'}}>
+        <span style=${{color:'var(--accent)',fontWeight:700,fontSize:14,letterSpacing:1.5,textTransform:'uppercase'}}>Download as GIF</span>
+        <button onClick=${props.onClose}
+          style=${{background:'none',border:'1px solid transparent',color:'#aaa',cursor:'pointer',fontSize:18,lineHeight:1,padding:'2px 8px',fontFamily:'Roboto,sans-serif',transition:'color 0.12s, border-color 0.12s'}}
+          onMouseEnter=${function(e){e.currentTarget.style.color='var(--accent)';e.currentTarget.style.borderColor='var(--accent)';}}
+          onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';e.currentTarget.style.borderColor='transparent';}}>✕</button>
+      </div>
+      <div style=${{display:'flex',flex:1,overflow:'hidden',minHeight:0}}>
+        <div ref=${leftPanelRef} style=${{flex:'1 1 0',minWidth:0,background:'#1a1a1a',display:'flex',alignItems:'center',justifyContent:'center',overflow:'auto',padding:'8px',boxSizing:'border-box'}}>
+          <div style=${{display:'inline-flex',flexDirection:'column',alignItems:'stretch',userSelect:'none',touchAction:'none',lineHeight:0}}>
+            ${addText&&gifText?html`<div style=${{background:'white',display:'flex',alignItems:'center',justifyContent:'center',width:cropBoxW,height:previewTextBoxH+'px',overflow:'hidden',lineHeight:'normal',flexShrink:0,boxSizing:'border-box'}}>
+              <span style=${{color:'#000',fontSize:Math.max(8,Math.round(textSize*pvScale))+'px',padding:'0 8px',textAlign:'center',maxWidth:'100%',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontFamily:'Roboto,sans-serif',fontWeight:400,
+                WebkitTextStroke:textWeight>0?(textWeight*pvScale*2)+'px black':''}}>${gifText}</span>
+            </div>`:null}
+            <div ref=${cropRef} style=${{position:'relative',lineHeight:0,width:cropBoxW,height:cropBoxH,flexShrink:0,overflow:'hidden'}}>
+              <video ref=${videoRef} muted playsinline onLoadedMetadata=${onVideoMeta}
+                onTimeUpdate=${onGifTimeUpdate} onEnded=${onGifEnded}
+                style=${{display:'block',width:'100%',height:'100%',objectFit:'fill'}}/>
+              <div style=${{position:'absolute',top:0,left:0,width:cl+'%',height:'100%',background:'rgba(0,0,0,0.55)',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',top:0,right:0,width:cr+'%',height:'100%',background:'rgba(0,0,0,0.55)',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',top:0,left:cl+'%',width:(100-cl-cr)+'%',height:ct+'%',background:'rgba(0,0,0,0.55)',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',bottom:0,left:cl+'%',width:(100-cl-cr)+'%',height:cb+'%',background:'rgba(0,0,0,0.55)',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',top:ct+'%',bottom:cb+'%',left:cl+'%',right:cr+'%',border:'2px solid var(--accent)',pointerEvents:'none',boxSizing:'border-box',boxShadow:'0 0 0 1px rgba(0,0,0,0.4)'}}/>
+              <div onPointerDown=${function(e){e.preventDefault();setDragging('left');}}
+                style=${{position:'absolute',top:'50%',left:'calc('+cl+'% - '+Math.round(HS/2)+'px)',transform:'translateY(-50%)',width:HS,height:HS*2,background:'var(--accent)',cursor:'ew-resize',zIndex:10,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 2px 8px rgba(0,0,0,0.6)'}}>
+                <div style=${{width:2,height:HS,background:'#000',pointerEvents:'none'}}/>
+              </div>
+              <div onPointerDown=${function(e){e.preventDefault();setDragging('right');}}
+                style=${{position:'absolute',top:'50%',right:'calc('+cr+'% - '+Math.round(HS/2)+'px)',transform:'translateY(-50%)',width:HS,height:HS*2,background:'var(--accent)',cursor:'ew-resize',zIndex:10,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 2px 8px rgba(0,0,0,0.6)'}}>
+                <div style=${{width:2,height:HS,background:'#000',pointerEvents:'none'}}/>
+              </div>
+              <div onPointerDown=${function(e){e.preventDefault();setDragging('top');}}
+                style=${{position:'absolute',top:'calc('+ct+'% - '+Math.round(HS/2)+'px)',left:'50%',transform:'translateX(-50%)',width:HS*2,height:HS,background:'var(--accent)',cursor:'ns-resize',zIndex:10,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 2px 8px rgba(0,0,0,0.6)'}}>
+                <div style=${{height:2,width:HS,background:'#000',pointerEvents:'none'}}/>
+              </div>
+              <div onPointerDown=${function(e){e.preventDefault();setDragging('bottom');}}
+                style=${{position:'absolute',bottom:'calc('+cb+'% - '+Math.round(HS/2)+'px)',left:'50%',transform:'translateX(-50%)',width:HS*2,height:HS,background:'var(--accent)',cursor:'ns-resize',zIndex:10,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 2px 8px rgba(0,0,0,0.6)'}}>
+                <div style=${{height:2,width:HS,background:'#000',pointerEvents:'none'}}/>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style=${{width:230,flexShrink:0,borderLeft:'1px solid #1e1e1e',padding:'14px 14px',overflowY:'auto',background:'#111',display:'flex',flexDirection:'column',gap:0}}>
+          <div style=${sectionSt}>
+            <label style=${labelSt}>FRAME RATE (fps)</label>
+            <${NumInput} value=${fps} onChange=${setFps} min=1 max=60/>
+          </div>
+          <div style=${sectionSt}>
+            <label style=${labelSt}>OUTPUT WIDTH (px)</label>
+            <${NumInput} value=${gifWidth} onChange=${setGifWidth} min=64 max=1920/>
+          </div>
+          <div style=${{...sectionSt,borderTop:'1px solid #1e1e1e',paddingTop:12,marginTop:4}}>
+            <div style=${{color:'var(--accent)',fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>TRIM${vidDuration>0?html` <span style=${{color:'#555',fontWeight:400,fontSize:10}}>/ ${vidDuration}s total</span>`:''}</div>
+            <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:4}}>
+              <div>
+                <label style=${labelSt}>START (s)</label>
+                <${NumInput} value=${trimStart} onChange=${function(v){
+                  var s=Math.max(0,v);
+                  setTrimStart(s);
+                  if(trimEnd>0&&s>=trimEnd) setTrimEnd(0);
+                }} min=0 max=9999 step=0.1/>
+              </div>
+              <div>
+                <label style=${labelSt}>END (s)${trimEnd===0?html` <span style=${{color:'#555',fontSize:9}}>(full)</span>`:''}</label>
+                <${NumInput} value=${trimEnd} onChange=${function(v){
+                  var e=Math.max(0,v);
+                  setTrimEnd(e);
+                  if(e>0&&e<=trimStart) setTrimStart(Math.max(0,e-0.1));
+                }} min=0 max=9999 step=0.1/>
+              </div>
+            </div>
+            <div style=${{fontSize:10,color:'#444',marginTop:2}}>End = 0 means use the full video</div>
+          </div>
+          <div style=${{...sectionSt,borderTop:'1px solid #1e1e1e',paddingTop:12,marginTop:4}}>
+            <div style=${{color:'var(--accent)',fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>CROP</div>
+            <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:4}}>
+              <div><label style=${labelSt}>Left %</label><${NumInput} value=${Math.round(cropLeft*10)/10} onChange=${function(v){setCropLeft(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
+              <div><label style=${labelSt}>Right %</label><${NumInput} value=${Math.round(cropRight*10)/10} onChange=${function(v){setCropRight(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
+              <div><label style=${labelSt}>Top %</label><${NumInput} value=${Math.round(cropTop*10)/10} onChange=${function(v){setCropTop(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
+              <div><label style=${labelSt}>Bottom %</label><${NumInput} value=${Math.round(cropBottom*10)/10} onChange=${function(v){setCropBottom(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
+            </div>
+            <div style=${{fontSize:10,color:'#444',marginTop:2}}>Drag handles on the video to crop</div>
+          </div>
+          <div style=${{...sectionSt,borderTop:'1px solid #1e1e1e',paddingTop:12,marginTop:4}}>
+            <label style=${{display:'flex',alignItems:'center',gap:8,cursor:'pointer',marginBottom:addText?10:0}}>
+              <input type="checkbox" checked=${addText} onChange=${function(e){setAddText(e.target.checked);}}
+                style=${{accentColor:'var(--accent)',cursor:'pointer',width:14,height:14}}/>
+              <span style=${{fontSize:12,color:addText?'var(--accent)':'#888',fontWeight:addText?700:400,letterSpacing:0.5,transition:'color 0.12s'}}>ADD TEXT ABOVE VIDEO</span>
+            </label>
+            ${addText?html`<div>
+              <div style=${sectionSt}>
+                <label style=${labelSt}>TEXT</label>
+                <input type="text" value=${gifText}
+                  onInput=${function(e){setGifText(e.target.value.slice(0,200));}}
+                  placeholder="Enter caption..."
+                  style=${{background:'#111',border:'1px solid #333',color:'#f1f1f1',padding:'6px 10px',fontSize:13,outline:'none',width:'100%',boxSizing:'border-box',fontFamily:'Roboto,sans-serif'}}
+                  onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
+                  onBlur=${function(e){e.target.style.borderColor='#333';}}/>
+              </div>
+              <div style=${sectionSt}>
+                <label style=${labelSt}>TEXT SIZE (px)</label>
+                <${NumInput} value=${textSize} onChange=${setTextSize} min=6 max=120/>
+              </div>
+              <div style=${sectionSt}>
+                <label style=${labelSt}>TEXT THICKNESS (stroke 0–10)</label>
+                <${NumInput} value=${textWeight} onChange=${setTextWeight} min=0 max=10 step=0.5/>
+              </div>
+              <div>
+                <label style=${labelSt}>TEXT BOX HEIGHT (px in gif)</label>
+                <${NumInput} value=${textBoxH} onChange=${setTextBoxH} min=10 max=400/>
+              </div>
+            </div>`:null}
+          </div>
+          <div style=${{marginTop:'auto',paddingTop:14,borderTop:'1px solid #1e1e1e'}}>
+            ${error?html`<div style=${{color:'#ff5555',fontSize:11,marginBottom:10,padding:'7px 10px',background:'rgba(255,0,0,0.07)',border:'1px solid rgba(255,0,0,0.18)',lineHeight:1.4}}>${error}</div>`:null}
+            <button onClick=${makeGif} disabled=${making}
+              style=${{width:'100%',padding:'10px 0',background:making?'var(--accent-solid-dim)':'var(--accent)',color:making?'var(--accent)':'#000',border:'1px solid var(--accent)',fontSize:13,fontWeight:700,cursor:making?'default':'pointer',letterSpacing:1.5,textTransform:'uppercase',transition:'background 0.15s,color 0.15s',fontFamily:'Roboto,sans-serif'}}
+              onMouseEnter=${function(e){if(!making){e.currentTarget.style.background='#fff';e.currentTarget.style.color='#000';}}}
+              onMouseLeave=${function(e){if(!making){e.currentTarget.style.background='var(--accent)';e.currentTarget.style.color='#000';}}}>${making?'Making GIF…':'Make GIF'}</button>
+            ${making?html`<div style=${{marginTop:7,fontSize:10,color:'#555',textAlign:'center'}}>Processing with FFmpeg, please wait…</div>`:null}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 // ── Watch page ────────────────────────────────────────────────────────────────
 function WatchPage(props) {
   const post   = props.post;
@@ -4189,6 +4601,7 @@ function WatchPage(props) {
   const ADULT_LABELS=['sexual','porn','nudity','graphic-media','adult'];
   const isAdult=!!(displayPost.labels&&displayPost.labels.some(function(l){return ADULT_LABELS.indexOf(l.val)!==-1;}));
   const [downloading, setDownloading] = useState(false);
+  const [showGifMaker, setShowGifMaker] = useState(false);
   const [watchMenuOpen, setWatchMenuOpen] = useState(false);
   const [watchMenuHov, setWatchMenuHov] = useState(false);
   const [watchOptHov, setWatchOptHov] = useState('');
@@ -4278,7 +4691,7 @@ function WatchPage(props) {
     } catch(e) { setWatchPlaylistMsg('Error adding.'); }
   }
 
-  return html`<div style=${{display:'flex',flexDirection:portrait?'column':'row',gap:24,padding:portrait?'12px 8px':24,maxWidth:1600,margin:'0 auto'}}>${showShare?html`<${ShareModal} post=${displayPost} session=${sess} onClose=${function(){setShowShare(false);}}/>`  :null}
+  return html`<div style=${{display:'flex',flexDirection:portrait?'column':'row',gap:24,padding:portrait?'12px 8px':24,maxWidth:1600,margin:'0 auto'}}>${showShare?html`<${ShareModal} post=${displayPost} session=${sess} onClose=${function(){setShowShare(false);}}/>`  :null}${showGifMaker&&embed&&embed.playlist?html`<${GifMakerModal} playlist=${embed.playlist} onClose=${function(){setShowGifMaker(false);}}/>`  :null}
     <div style=${{flex:1,minWidth:0}}>
       <div style=${{overflow:'hidden',background:'#000'}}>
         ${isSeries
@@ -4329,6 +4742,12 @@ function WatchPage(props) {
                   onClick=${function(e){e.stopPropagation();setWatchMenuOpen(false);downloadVideo();}}>
                   ${downloading?'Downloading…':'Download'}
                 </button>
+                ${!isSeries&&embed&&embed.playlist?html`<button style=${{display:'block',width:'100%',padding:'9px 14px',background:watchOptHov==='gif'?'var(--accent-dim)':'none',border:'none',borderLeft:watchOptHov==='gif'?'2px solid var(--accent)':'2px solid transparent',color:watchOptHov==='gif'?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s'}}
+                  onMouseEnter=${function(){setWatchOptHov('gif');}}
+                  onMouseLeave=${function(){setWatchOptHov('');}}
+                  onClick=${function(e){e.stopPropagation();setWatchMenuOpen(false);setShowGifMaker(true);}}>
+                  Download as GIF
+                </button>`:null}
                 <button style=${{display:'block',width:'100%',padding:'9px 14px',background:watchOptHov==='pl'?'var(--accent-dim)':'none',border:'none',borderLeft:watchOptHov==='pl'?'2px solid var(--accent)':'2px solid transparent',color:watchOptHov==='pl'?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s'}}
                   onMouseEnter=${function(){setWatchOptHov('pl');}}
                   onMouseLeave=${function(){setWatchOptHov('');}}
@@ -7877,6 +8296,7 @@ function App() {
   const [followStrip,   setFollowStrip]   = useState([]);
   const [friendsKey,    setFriendsKey]    = useState(0);
   const [layerSeq,      setLayerSeq]      = useState(0); // bumped when same-layer params change
+  const [_prefetchBump, _setPrefetchBump] = useState(0); // bumped to trigger render of pre-mounted layers
 
   // ── Layer-based navigation ───────────────────────────────────────────────────
   // Each "layer" is a mounted page that stays alive when hidden (visibility:hidden).
@@ -7893,6 +8313,7 @@ function App() {
   const navLayers  = useRef([]);   // [{key, type, params, scrollY}]
   const navHistory = useRef([]);   // [key, key, ...]
   const navIdxRef  = useRef(0);
+  const _subsInFlight = useRef(false); // prevent concurrent subs loads
   const [navIdx, setNavIdx] = useState(function(){
     // Sync init: start with a sensible base layer from localStorage
     var lp = loadLastPage()||'search';
@@ -8256,15 +8677,14 @@ function App() {
   },[session]);
 
   // ── Subscriptions ───────────────────────────────────────────────────────────
-  const handleSubs = useCallback(async function(){
-    navigateTo('subs',{});
-    if(subsLoaded) return;
+  const _doLoadSubs = useCallback(async function(){
+    if(!session || subsLoaded || _subsInFlight.current) return;
+    _subsInFlight.current = true;
     setSubsLoading(true);
     const seen=new Set(); const videos=[];
     const strip=[];
     function add(posts){(posts||[]).forEach(function(p){if(p&&isVid(p)&&!seen.has(p.uri)&&!(p.record&&p.record.reply)){videos.push(p);seen.add(p.uri);}});}
     try{
-      if(!session) return;
       const fR=await api(AUTH_PROXY+'/app.bsky.graph.getFollows?actor='+encodeURIComponent(session.did)+'&limit=100',
         {headers:{Authorization:'Bearer '+session.accessJwt}});
       if(fR.ok){
@@ -8311,7 +8731,22 @@ function App() {
     setSubsVideos(videos);
     setSubsLoading(false);
     setSubsLoaded(true);
+    _subsInFlight.current = false;
   },[session, subsLoaded]);
+  const handleSubs = useCallback(function(){
+    navigateTo('subs',{});
+    _doLoadSubs();
+  },[navigateTo, _doLoadSubs]);
+  // Background prefetch — start loading Subs and pre-mount Friends as soon as session is available
+  useEffect(function(){
+    if(!session) return;
+    _doLoadSubs();
+    var fKey='page:friends';
+    if(!navLayers.current.find(function(l){return l.key===fKey;})){
+      navLayers.current.push({key:fKey,type:'friends',params:{},scrollY:0});
+      _setPrefetchBump(function(n){return n+1;});
+    }
+  },[session]);
 
   // ── Watch ───────────────────────────────────────────────────────────────────
   const handleWatch = useCallback(function(post){
@@ -8764,6 +9199,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._get_part()
         elif self.path.startswith("/download/hls"):
             self._handle_hls_download()
+        elif self.path.startswith("/gif-info"):
+            self._gif_info()
         elif self.path.startswith("/local-data/"):
             name = self.path[len("/local-data/"):]
             if name in ("history", "watchlist"):
@@ -8805,6 +9242,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._process_video()
         elif self.path == "/split-video":
             self._split_video()
+        elif self.path == "/make-gif":
+            self._make_gif()
         elif self.path.startswith("/local-data/"):
             name = self.path[len("/local-data/"):]
             if name in ("history", "watchlist"):
@@ -8823,6 +9262,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not os.path.isfile(ffmpeg):
                 return None
         return ffmpeg
+
+    def _find_font(self):
+        """Find a usable TTF/OTF font file for FFmpeg drawtext."""
+        if sys.platform == 'win32':
+            windir = os.environ.get('WINDIR', r'C:\Windows')
+            for name in ['arial.ttf', 'Arial.ttf', 'calibri.ttf', 'verdana.ttf',
+                         'tahoma.ttf', 'segoeui.ttf', 'consola.ttf']:
+                p = os.path.join(windir, 'Fonts', name)
+                if os.path.isfile(p):
+                    return p
+        else:
+            for p in [
+                '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+                '/usr/share/fonts/TTF/DejaVuSans.ttf',
+                '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+                '/System/Library/Fonts/Helvetica.ttc',
+                '/Library/Fonts/Arial.ttf',
+            ]:
+                if os.path.isfile(p):
+                    return p
+        return None
+
+    @staticmethod
+    def _ffmpeg_err(stderr_bytes):
+        """Extract the useful tail of FFmpeg stderr, skipping verbose build/stream info."""
+        text = stderr_bytes.decode('utf-8', errors='replace')
+        lines = text.splitlines()
+        # Find the last block of meaningful error lines (skip build config / stream info)
+        error_lines = []
+        for line in reversed(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Stop once we hit the verbose preamble lines
+            if stripped.startswith('ffmpeg version') or stripped.startswith('built with') \
+               or stripped.startswith('configuration:') or stripped.startswith('lib'):
+                break
+            error_lines.append(stripped)
+        if error_lines:
+            return '\n'.join(reversed(error_lines))
+        # Fallback: last 600 chars
+        return text[-600:]
 
     def _handle_hls_download(self):
         """Stream all .ts segments of an HLS playlist to the client — no FFmpeg needed."""
@@ -8906,6 +9387,371 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_error(500, f'Download failed: {e}')
             except Exception:
                 pass
+
+    def _gif_info(self):
+        """Return width, height, fps for an HLS playlist URL by probing the first media segment."""
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        playlist_url = qs.get('url', [''])[0]
+        if not playlist_url:
+            self._json({'width': 0, 'height': 0, 'fps': 0}); return
+
+        ffmpeg = self._find_ffmpeg()
+        if not ffmpeg:
+            self._json({'width': 0, 'height': 0, 'fps': 0}); return
+
+        ff_dir = os.path.dirname(ffmpeg) if os.path.isabs(ffmpeg) else ""
+        ext = '.exe' if sys.platform == 'win32' else ''
+        ffprobe = (os.path.join(ff_dir, 'ffprobe' + ext)
+                   if ff_dir and os.path.isfile(os.path.join(ff_dir, 'ffprobe' + ext))
+                   else shutil.which('ffprobe') or 'ffprobe')
+        cf = 0x08000000 if sys.platform == 'win32' else 0
+
+        tmpdir = tempfile.mkdtemp(prefix="raccnet_info_")
+        try:
+            hdrs = {'User-Agent': 'RaccNet/1.0', 'Origin': 'https://bsky.app'}
+
+            def fetch(url):
+                req = urllib.request.Request(url, headers=hdrs)
+                return urllib.request.urlopen(req, context=_SSL_CTX, timeout=20)
+
+            with fetch(playlist_url) as resp:
+                master_text = resp.read().decode('utf-8', errors='replace')
+            base = playlist_url.rsplit('/', 1)[0] + '/'
+            lines = [l.strip() for l in master_text.splitlines()]
+
+            # Find the first (any) variant or media segment
+            best_url = None
+            i = 0
+            while i < len(lines):
+                if lines[i].startswith('#EXT-X-STREAM-INF'):
+                    j = i + 1
+                    while j < len(lines) and (not lines[j] or lines[j].startswith('#')):
+                        j += 1
+                    if j < len(lines):
+                        best_url = lines[j] if lines[j].startswith('http') else base + lines[j]
+                        break
+                i += 1
+
+            if best_url:
+                with fetch(best_url) as resp2:
+                    media_text = resp2.read().decode('utf-8', errors='replace')
+                media_lines = [l.strip() for l in media_text.splitlines()]
+                variant_base = best_url.rsplit('/', 1)[0] + '/'
+            else:
+                media_lines = lines
+                variant_base = base
+
+            # Download just the first segment for probing
+            first_seg = None
+            for ml in media_lines:
+                if ml and not ml.startswith('#'):
+                    first_seg = ml if ml.startswith('http') else variant_base + ml
+                    break
+            if not first_seg:
+                self._json({'width': 0, 'height': 0, 'fps': 0}); return
+
+            seg_path = os.path.join(tmpdir, "probe.ts")
+            with fetch(first_seg) as sr, open(seg_path, 'wb') as sf:
+                sf.write(sr.read(2 * 1024 * 1024))  # read up to 2 MB
+
+            probe = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height,r_frame_rate",
+                 "-of", "csv=p=0", seg_path],
+                capture_output=True, text=True, timeout=20, creationflags=cf)
+
+            w, h, fps = 0, 0, 0
+            if probe.returncode == 0 and probe.stdout.strip():
+                pts = [x for x in probe.stdout.strip().replace('\n', ',').split(',') if x]
+                if len(pts) >= 1:
+                    try: w = int(pts[0])
+                    except: pass
+                if len(pts) >= 2:
+                    try: h = int(pts[1])
+                    except: pass
+                if len(pts) >= 3:
+                    fr = pts[2].strip()
+                    try:
+                        if '/' in fr:
+                            num, den = fr.split('/', 1)
+                            fps = round(int(num) / max(1, int(den)))
+                        else:
+                            fps = int(fr)
+                    except: pass
+            self._json({'width': w, 'height': h, 'fps': fps})
+        except Exception:
+            self._json({'width': 0, 'height': 0, 'fps': 0})
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _make_gif(self):
+        """Convert an HLS video to an animated GIF using FFmpeg with crop, fps, scale, and optional text overlay."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            params = json.loads(body)
+        except Exception as e:
+            self._json_error(400, f"Bad request: {e}"); return
+
+        playlist_url  = str(params.get("playlist_url", "")).strip()
+        fps           = max(1, min(30, int(params.get("fps", 15))))
+        out_w_req     = max(64, min(1280, int(params.get("width", 480))))
+        crop_left     = max(0.0, min(49.0, float(params.get("crop_left", 0))))
+        crop_right    = max(0.0, min(49.0, float(params.get("crop_right", 0))))
+        crop_top      = max(0.0, min(49.0, float(params.get("crop_top", 0))))
+        crop_bottom   = max(0.0, min(49.0, float(params.get("crop_bottom", 0))))
+        add_text      = bool(params.get("add_text", False))
+        text          = str(params.get("text", ""))[:200].strip()
+        text_box_h    = max(10, min(400, int(params.get("text_box_height", 40))))
+        text_size     = max(6, min(120, int(params.get("text_size", 16))))
+        text_weight   = max(0.0, min(10.0, float(params.get("text_weight", 0))))
+        trim_start    = max(0.0, float(params.get("trim_start", 0)))
+        trim_end      = max(0.0, float(params.get("trim_end", 0)))
+        do_crop       = crop_left > 0 or crop_right > 0 or crop_top > 0 or crop_bottom > 0
+
+        if not playlist_url:
+            self._json_error(400, "Missing playlist_url"); return
+
+        ffmpeg = self._find_ffmpeg()
+        if not ffmpeg:
+            self._json_error(500, "FFmpeg not found. Please install FFmpeg."); return
+
+        # Derive ffprobe path alongside ffmpeg
+        ff_dir = os.path.dirname(ffmpeg) if os.path.isabs(ffmpeg) else ""
+        ext = '.exe' if sys.platform == 'win32' else ''
+        ffprobe = (os.path.join(ff_dir, 'ffprobe' + ext)
+                   if ff_dir and os.path.isfile(os.path.join(ff_dir, 'ffprobe' + ext))
+                   else shutil.which('ffprobe') or 'ffprobe')
+
+        cf = 0x08000000 if sys.platform == 'win32' else 0  # CREATE_NO_WINDOW
+        tmpdir = tempfile.mkdtemp(prefix="raccnet_gif_")
+        try:
+            hdrs = {'User-Agent': 'RaccNet/1.0', 'Origin': 'https://bsky.app'}
+
+            def fetch(url):
+                req = urllib.request.Request(url, headers=hdrs)
+                return urllib.request.urlopen(req, context=_SSL_CTX, timeout=30)
+
+            # Fetch master playlist
+            with fetch(playlist_url) as resp:
+                master_text = resp.read().decode('utf-8', errors='replace')
+            base = playlist_url.rsplit('/', 1)[0] + '/'
+            lines = [l.strip() for l in master_text.splitlines()]
+
+            # Find highest-bandwidth variant
+            best_bw, best_url = -1, None
+            i = 0
+            while i < len(lines):
+                if lines[i].startswith('#EXT-X-STREAM-INF'):
+                    bw = 0
+                    for part in lines[i].split(','):
+                        if part.startswith('BANDWIDTH='):
+                            try: bw = int(part.split('=', 1)[1])
+                            except: pass
+                    j = i + 1
+                    while j < len(lines) and (not lines[j] or lines[j].startswith('#')):
+                        j += 1
+                    if j < len(lines) and bw >= best_bw:
+                        best_bw = bw
+                        best_url = lines[j] if lines[j].startswith('http') else base + lines[j]
+                i += 1
+
+            if best_url:
+                variant_base = best_url.rsplit('/', 1)[0] + '/'
+                with fetch(best_url) as resp2:
+                    media_text = resp2.read().decode('utf-8', errors='replace')
+                lines = [l.strip() for l in media_text.splitlines()]
+            else:
+                variant_base = base
+
+            # Parse segments with their EXTINF durations for smart trimming
+            seg_info = []
+            cur_dur = None
+            for line in lines:
+                if line.startswith('#EXTINF:'):
+                    try: cur_dur = float(line[8:].split(',')[0])
+                    except: cur_dur = 4.0
+                elif line and not line.startswith('#'):
+                    url = line if line.startswith('http') else variant_base + line
+                    seg_info.append((url, cur_dur if cur_dur is not None else 4.0))
+                    cur_dur = None
+
+            if not seg_info:
+                self._json_error(404, "No segments found in HLS playlist"); return
+
+            # Only download segments that overlap [trim_start, trim_end]
+            # Also track first_seg_t so we can compute a relative seek within the TS.
+            first_seg_t = 0.0   # cumulative EXTINF start time of first selected segment
+            if trim_start > 0 or (trim_end > 0 and trim_end > trim_start):
+                selected = []
+                t = 0.0
+                found_first = False
+                for seg_url, seg_dur in seg_info:
+                    seg_end = t + seg_dur
+                    if seg_end > trim_start and (trim_end <= 0 or t < trim_end):
+                        if not found_first:
+                            first_seg_t = t
+                            found_first = True
+                        selected.append(seg_url)
+                    t = seg_end
+                    if trim_end > 0 and t >= trim_end:
+                        break
+                if not selected:
+                    selected = [u for u, _ in seg_info]
+            else:
+                selected = [u for u, _ in seg_info]
+
+            # Write selected segments into a single .ts file
+            ts_path = os.path.join(tmpdir, "input.ts")
+            written = 0
+            with open(ts_path, 'wb') as f:
+                for seg_url in selected:
+                    try:
+                        with fetch(seg_url) as sr:
+                            while True:
+                                chunk = sr.read(65536)
+                                if not chunk: break
+                                f.write(chunk)
+                                written += len(chunk)
+                    except Exception:
+                        pass  # skip bad segments
+            if written == 0:
+                self._json_error(500, "Failed to download any video segments"); return
+
+            # Probe actual video dimensions (only needed when cropping)
+            vid_w, vid_h = 0, 0
+            if do_crop:
+                try:
+                    probe = subprocess.run(
+                        [ffprobe, "-v", "error", "-select_streams", "v:0",
+                         "-show_entries", "stream=width,height", "-of", "csv=p=0", ts_path],
+                        capture_output=True, text=True, timeout=30, creationflags=cf)
+                    if probe.returncode == 0 and probe.stdout.strip():
+                        pts = [x for x in probe.stdout.strip().replace('\n',',').split(',') if x]
+                        if len(pts) >= 2:
+                            vid_w, vid_h = int(pts[0]), int(pts[1])
+                except Exception:
+                    pass
+                if vid_w <= 0 or vid_h <= 0:
+                    # ffprobe failed — skip crop to avoid wrong-dimension errors
+                    do_crop = False
+
+            # Output width (must be even)
+            out_w = out_w_req if out_w_req % 2 == 0 else out_w_req - 1
+            out_w = max(2, out_w)
+
+            # Compute trim range relative to the downloaded TS file.
+            # setpts=PTS-STARTPTS normalises whatever PTS offset HLS has (e.g. 1.42 s)
+            # to zero first, so trim=start/end are always relative to the file start.
+            ts_seek = max(0.0, round(trim_start - first_seg_t, 6))
+            ts_duration = round(trim_end - trim_start, 6) if trim_end > 0 and trim_end > trim_start else 0.0
+
+            # Build base filter chain
+            vf_parts = []
+
+            # Trim using video filters (most reliable — avoids pre-input -ss keyframe issues
+            # and HLS PTS-offset problems that produce 0 decoded frames).
+            if ts_seek > 0 or ts_duration > 0:
+                ts_end = round(ts_seek + ts_duration, 6) if ts_duration > 0 else 0
+                # First setpts resets HLS PTS offset → trim sees timestamps from 0
+                if ts_end > 0:
+                    vf_parts.append(
+                        f"setpts=PTS-STARTPTS,trim=start={ts_seek:.6f}:end={ts_end:.6f},setpts=PTS-STARTPTS")
+                else:
+                    vf_parts.append(
+                        f"setpts=PTS-STARTPTS,trim=start={ts_seek:.6f},setpts=PTS-STARTPTS")
+
+            if do_crop:
+                cx = max(0, round(vid_w * crop_left  / 100))
+                cy = max(0, round(vid_h * crop_top   / 100))
+                cw = round(vid_w * (1 - crop_left / 100 - crop_right  / 100))
+                ch = round(vid_h * (1 - crop_top  / 100 - crop_bottom / 100))
+                cw = max(2, cw if cw % 2 == 0 else cw - 1)
+                ch = max(2, ch if ch % 2 == 0 else ch - 1)
+                # Safety: ensure crop region fits within actual video
+                if cx + cw <= vid_w and cy + ch <= vid_h:
+                    vf_parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
+            # If adding text, render at 2× width so borderw can be an integer while still
+            # achieving 0.5px effective steps at output resolution (each borderw=1 at 2× → 0.5px out).
+            render_scale = 2 if (add_text and text) else 1
+            vf_parts.append(f"scale={out_w * render_scale}:-2")
+            vf_parts.append(f"fps={fps}")
+
+            if add_text and text:
+                esc = (text.replace('\\', '\\\\')
+                           .replace("'", "\\'")
+                           .replace(':', '\\:')
+                           .replace('%', '\\%'))
+                # Resolve font file so drawtext works on Windows without fontconfig
+                font_path = self._find_font()
+                if font_path:
+                    # FFmpeg requires forward slashes and escaped colon for drive letter
+                    fp = font_path.replace('\\', '/').replace(':', '\\:')
+                    font_spec = f"fontfile='{fp}'"
+                else:
+                    font_spec = "font=Arial"
+                # Ensure text_box_h is even; double it since we're at 2× resolution
+                tb = text_box_h if text_box_h % 2 == 0 else text_box_h + 1
+                tb2 = tb * render_scale
+                # borderw at 2× resolution: round(text_weight*2) is always a whole integer,
+                # but gives 0.5px effective steps at final output resolution after scale-down.
+                # CSS preview uses stroke = text_weight*pvScale*2 (half visible = text_weight*pvScale),
+                # FFmpeg gives round(text_weight*2)/2 px at output = text_weight px — they match.
+                bw = int(round(text_weight * render_scale))
+                # Pad white strip above the video at 2× height, then draw text centred in it
+                vf_parts.append(f"pad=iw:ih+{tb2}:0:{tb2}:white")
+                border_spec = f":borderw={bw}:bordercolor=black" if bw > 0 else ""
+                vf_parts.append(
+                    f"drawtext={font_spec}:text='{esc}':fontcolor=black:fontsize={text_size * render_scale}"
+                    f"{border_spec}:x=(w-text_w)/2:y=({tb2}-text_h)/2")
+                # Scale back down to the requested output width after text rendering
+                vf_parts.append(f"scale={out_w}:-2")
+
+            vf_base = ",".join(vf_parts)
+
+            # Two-pass GIF: pass 1 generates palette, pass 2 renders GIF.
+            # No pre-input -ss: trimming is done entirely by the filter chain above,
+            # which is immune to HLS PTS offsets and H264 keyframe alignment issues.
+            palette_path = os.path.join(tmpdir, "palette.png")
+            gif_path     = os.path.join(tmpdir, "output.gif")
+
+            cmd1 = [ffmpeg, "-y", "-i", ts_path, "-an",
+                    "-vf", vf_base + ",palettegen=max_colors=256:stats_mode=diff",
+                    palette_path]
+            r1 = subprocess.run(cmd1, capture_output=True, timeout=120, creationflags=cf)
+            if r1.returncode != 0:
+                self._json_error(500, "FFmpeg palette pass failed: " + self._ffmpeg_err(r1.stderr))
+                return
+            if not os.path.isfile(palette_path):
+                self._json_error(500, "FFmpeg palette pass produced no output (0 frames?). "
+                                      "Stderr: " + self._ffmpeg_err(r1.stderr))
+                return
+
+            fc2 = f"[0:v]{vf_base}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5"
+            cmd2 = [ffmpeg, "-y", "-i", ts_path, "-i", palette_path, "-an",
+                    "-filter_complex", fc2, "-loop", "0", gif_path]
+            r2 = subprocess.run(cmd2, capture_output=True, timeout=180, creationflags=cf)
+            if r2.returncode != 0:
+                self._json_error(500, "FFmpeg GIF pass failed: " + self._ffmpeg_err(r2.stderr))
+                return
+
+            with open(gif_path, 'rb') as f:
+                gif_data = f.read()
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/gif')
+            self.send_header('Content-Disposition', 'attachment; filename="raccnet.gif"')
+            self.send_header('Content-Length', str(len(gif_data)))
+            self.send_cors()
+            self.end_headers()
+            self.wfile.write(gif_data)
+
+        except subprocess.TimeoutExpired:
+            self._json_error(500, "GIF creation timed out")
+        except Exception as e:
+            self._json_error(500, str(e))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _serve_html(self):
         self.send_response(200)

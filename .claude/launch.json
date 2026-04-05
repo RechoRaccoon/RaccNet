@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "RaccTube Server",
+      "name": "RaccNet Server",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-X", "utf8", "raccnet_server.py"],
       "port": 8080

@@ -1,5 +1,5 @@
 ("C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
- 'Websites\\RaccTube\\build\\RaccNet\\RaccNet.pkg',
+ 'Websites\\RaccNet\\build\\RaccNet\\RaccNet.pkg',
  {'BINARY': True,
   'DATA': True,
   'EXECUTABLE': True,
@@ -12,27 +12,27 @@
  [('pyi-contents-directory _internal', '', 'OPTION'),
   ('PYZ-00.pyz',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\build\\RaccNet\\PYZ-00.pyz',
+   'Websites\\RaccNet\\build\\RaccNet\\PYZ-00.pyz',
    'PYZ'),
   ('struct',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\build\\RaccNet\\localpycs\\struct.pyc',
+   'Websites\\RaccNet\\build\\RaccNet\\localpycs\\struct.pyc',
    'PYMODULE'),
   ('pyimod01_archive',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\build\\RaccNet\\localpycs\\pyimod01_archive.pyc',
+   'Websites\\RaccNet\\build\\RaccNet\\localpycs\\pyimod01_archive.pyc',
    'PYMODULE'),
   ('pyimod02_importers',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\build\\RaccNet\\localpycs\\pyimod02_importers.pyc',
+   'Websites\\RaccNet\\build\\RaccNet\\localpycs\\pyimod02_importers.pyc',
    'PYMODULE'),
   ('pyimod03_ctypes',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\build\\RaccNet\\localpycs\\pyimod03_ctypes.pyc',
+   'Websites\\RaccNet\\build\\RaccNet\\localpycs\\pyimod03_ctypes.pyc',
    'PYMODULE'),
   ('pyimod04_pywin32',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\build\\RaccNet\\localpycs\\pyimod04_pywin32.pyc',
+   'Websites\\RaccNet\\build\\RaccNet\\localpycs\\pyimod04_pywin32.pyc',
    'PYMODULE'),
   ('pyiboot01_bootstrap',
    'C:\\Users\\Shadow\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
@@ -42,7 +42,7 @@
    'PYSOURCE'),
   ('launcher',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\launcher.py',
+   'Websites\\RaccNet\\launcher.py',
    'PYSOURCE'),
   ('python312.dll',
    'C:\\Users\\Shadow\\AppData\\Local\\Programs\\Python\\Python312\\python312.dll',
@@ -91,15 +91,15 @@
    'BINARY'),
   ('RaccNet Icon.ico',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\RaccNet Icon.ico',
+   'Websites\\RaccNet\\RaccNet Icon.ico',
    'DATA'),
   ('raccnet_server.py',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\raccnet_server.py',
+   'Websites\\RaccNet\\raccnet_server.py',
    'DATA'),
   ('base_library.zip',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\build\\RaccNet\\base_library.zip',
+   'Websites\\RaccNet\\build\\RaccNet\\base_library.zip',
    'DATA')],
  'python312.dll',
  False,

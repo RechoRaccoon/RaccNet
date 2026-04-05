@@ -1,5 +1,5 @@
 ("C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
- 'Websites\\RaccTube\\build\\RaccNet\\PYZ-00.pyz',
+ 'Websites\\RaccNet\\build\\RaccNet\\PYZ-00.pyz',
  [('_compat_pickle',
    'C:\\Users\\Shadow\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\_compat_pickle.py',
    'PYMODULE'),
@@ -293,7 +293,7 @@
    'PYMODULE'),
   ('raccnet_server',
    "C:\\Users\\Shadow\\Documents\\Recho Raccoon's Projects\\Vibe Coded "
-   'Websites\\RaccTube\\raccnet_server.py',
+   'Websites\\RaccNet\\raccnet_server.py',
    'PYMODULE'),
   ('random',
    'C:\\Users\\Shadow\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\random.py',
