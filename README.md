@@ -1,1 +1,1 @@
-RaccNet is an open-source YouTube-like AT-protocol project for PC and Android created by Recho Raccoon using Claude. Download the latest exe or APK in [Releases](https://github.com/RechoRaccoon/RaccNet/releases)
+RaccNet is an open-source YouTube-like AT-protocol project for PC and Android created by Recho Raccoon using Claude. Download and rub the latest exe or APK in [Releases](https://github.com/RechoRaccoon/RaccNet/releases)
