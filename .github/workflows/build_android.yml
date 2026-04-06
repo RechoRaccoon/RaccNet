@@ -45,6 +45,13 @@ jobs:
       - name: Install buildozer + cython
         run: pip install buildozer==1.5.0 cython==3.0.11 virtualenv
 
+      - name: Configure git for large/slow submodule clones
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 0
+          git config --global http.lowSpeedTime 999999
+          git config --global fetch.recurseSubmodules false
+
       - name: Cache Android SDK/NDK (speeds up repeat builds a lot)
         uses: actions/cache@v4
         with:
@@ -54,12 +61,22 @@ jobs:
           restore-keys: |
             buildozer-android-sdk-
 
-      - name: Build APK
+      - name: Build APK (with retry on submodule clone failures)
         env:
           JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
         run: |
           cd android
-          yes | buildozer android debug 2>&1
+          for attempt in 1 2 3; do
+            echo "=== Build attempt $attempt ==="
+            yes | buildozer android debug 2>&1 && break
+            if [ $attempt -lt 3 ]; then
+              echo "Attempt $attempt failed, waiting 30s before retry..."
+              sleep 30
+            else
+              echo "All 3 attempts failed."
+              exit 1
+            fi
+          done
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
