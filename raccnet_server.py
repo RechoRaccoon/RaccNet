@@ -134,6 +134,15 @@ function usePortrait() {
   },[]);
   return portrait;
 }
+function useWindowWidth() {
+  const [w, setW] = useState(window.innerWidth);
+  useEffect(function(){
+    function onResize(){ setW(window.innerWidth); }
+    window.addEventListener('resize', onResize);
+    return function(){ window.removeEventListener('resize', onResize); };
+  },[]);
+  return w;
+}
 
 // React Context for liked post URIs — avoids prop-drilling through every component
 const LikedUrisCtx = createContext(new Set());
@@ -1337,7 +1346,7 @@ function LoginModal(props) {
   </div>`;
 }
 
-const GRID_PAGE = 24;
+const GRID_PAGE = 20;
 const LIST_PAGE = 20;
 
 // ── useScrollLoad: auto-loads more as user scrolls near the bottom ─────────
@@ -1758,11 +1767,29 @@ function VideoGrid(props) {
     setVisible(function(v) { return v + GRID_PAGE; });
   }, []);
 
-  useScrollLoad(hasMore && !props.loading, loadMore);
+  // When local buffer is running low and there are more pages from API, pre-fetch
+  const apiLoadRef = useRef(false);
+  useEffect(function() {
+    if (!props.hasMoreFromAPI || props.loading || !props.onLoadMoreAPI || apiLoadRef.current) return;
+    if (rawItems.length > 0 && rawItems.length - visible < GRID_PAGE) {
+      apiLoadRef.current = true;
+      props.onLoadMoreAPI();
+      setTimeout(function() { apiLoadRef.current = false; }, 2000);
+    }
+  }, [visible, rawItems.length, props.hasMoreFromAPI, props.loading]);
+
+  const handleLoadMore = useCallback(function() {
+    loadMore();
+    if (props.onLoadMoreAPI && props.hasMoreFromAPI && !props.loading) {
+      props.onLoadMoreAPI();
+    }
+  }, [loadMore, props.onLoadMoreAPI, props.hasMoreFromAPI, props.loading]);
+
+  useScrollLoad((hasMore || (props.hasMoreFromAPI && !props.loading)), handleLoadMore);
 
   if (props.loading && !rawItems.length) {
     return html`<div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat(auto-fill,minmax(280px,1fr))',gap:portrait?'16px 8px':'24px 16px'}}>
-      ${[0,1,2,3,4,5,6,7,8,9,10,11].map(function(i){return html`<${SkeletonCard} key=${i}/>`;})}</div>`;
+      ${Array.from({length:15},function(_,i){return html`<${SkeletonCard} key=${i}/>`; })}</div>`;
   }
   if (!rawItems.length) {
     return html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'40vh',gap:16,color:'#aaa'}}>
@@ -1782,20 +1809,13 @@ function VideoGrid(props) {
         return html`<${VideoCard} key=${(p&&p.uri)||i} post=${p} repostedBy=${reposter} session=${props.session||null} onWatch=${props.onWatch} onChannel=${props.onChannel} onShare=${props.onShare||null} onRemovedFromPlaylist=${props.onRemovedFromPlaylist||null} currentPlaylistUri=${props.currentPlaylistUri||null}/>`;
       })}
     </div>
-    ${hasMore?html`<button onClick=${loadMore}
-      style=${{display:'block',margin:'24px auto',padding:'10px 32px',
-        background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',
-        color:'var(--accent)',fontSize:14,cursor:'pointer',fontWeight:600,
-        fontFamily:'Roboto,sans-serif',borderRadius:0}}>
-      Load More
-    </button>`:null}
-    ${!hasMore&&props.hasMoreFromAPI?html`<button onClick=${props.onLoadMoreAPI}
+    ${(hasMore||props.hasMoreFromAPI)?html`<button onClick=${handleLoadMore}
       disabled=${!!props.loading}
       style=${{display:'block',margin:'24px auto',padding:'10px 32px',
         background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',
         color:props.loading?'#666':'var(--accent)',fontSize:14,cursor:props.loading?'default':'pointer',fontWeight:600,
         fontFamily:'Roboto,sans-serif',borderRadius:0}}>
-      ${props.loading?'Loading…':'Load More from Feed'}
+      ${props.loading?'Loading…':'Load More'}
     </button>`:null}
   </div>`;
 }
@@ -2793,15 +2813,38 @@ function FeedPage(props) {
     (async function(){
       try{
         var authOpts=sess?{headers:{Authorization:'Bearer '+sess.accessJwt}}:{};
-        var endpoint=sess?AUTH_PROXY:PUB_PROXY;
-        var r=null, authFailed=false, cursor=null;
-        try{ r=await api(endpoint+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100',authOpts); }catch(e){ r=null; }
-        if(r&&r.ok){ var d=await r.json(); addVids((d.feed||[]).map(function(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;})); cursor=d.cursor||null; }
-        else if(r&&!r.ok) authFailed=r.status!==404;
-        if(videos.length<10&&!authFailed){
-          var r2=null;
-          try{ r2=await api(PUB_PROXY+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100'); }catch(e){}
-          if(r2&&r2.ok){ var d2=await r2.json(); addVids((d2.feed||[]).map(function(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;})); if(!cursor) cursor=d2.cursor||null; }
+        var cursor=null;
+        function mapItem(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;}
+        // Loop auth proxy until 20 videos or no cursor
+        if(sess){
+          try{
+            var aCursor=null;
+            for(var aPage=0;videos.length<20&&aPage<8&&!cancelled;aPage++){
+              var r=null;
+              try{r=await api(AUTH_PROXY+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100'+(aCursor?'&cursor='+encodeURIComponent(aCursor):''),authOpts);}catch(e){break;}
+              if(!r||!r.ok) break;
+              var d=await r.json();
+              addVids((d.feed||[]).map(mapItem));
+              aCursor=d.cursor||null; cursor=aCursor;
+              if(!aCursor) break;
+            }
+          }catch(e){}
+        }
+        // Supplement with public proxy if still under 20
+        if(videos.length<20&&!cancelled){
+          try{
+            var pCursor=null;
+            for(var pPage=0;videos.length<20&&pPage<8&&!cancelled;pPage++){
+              var r2=null;
+              try{r2=await api(PUB_PROXY+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100'+(pCursor?'&cursor='+encodeURIComponent(pCursor):''));}catch(e){break;}
+              if(!r2||!r2.ok) break;
+              var d2=await r2.json();
+              addVids((d2.feed||[]).map(mapItem));
+              pCursor=d2.cursor||null;
+              if(!cursor) cursor=pCursor;
+              if(!pCursor) break;
+            }
+          }catch(e){}
         }
         if(!cancelled){ setFeedCursor(cursor); setFeedVideos(videos); }
       }catch(e){ console.error('FeedPage loadVideos:',e); }
@@ -2816,13 +2859,19 @@ function FeedPage(props) {
     try{
       var authOpts=props.session?{headers:{Authorization:'Bearer '+props.session.accessJwt}}:{};
       var endpoint=props.session?AUTH_PROXY:PUB_PROXY;
-      var r=await api(endpoint+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100&cursor='+encodeURIComponent(feedCursor),authOpts);
-      if(r&&r.ok){
+      var cursor=feedCursor;
+      var newVids=[]; var seenNew=new Set(feedVideos.map(function(p){return p.uri;}));
+      function mapItem2(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;}
+      for(var pg=0;newVids.length<20&&cursor&&pg<8;pg++){
+        var r=null;
+        try{r=await api(endpoint+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100&cursor='+encodeURIComponent(cursor),authOpts);}catch(e){break;}
+        if(!r||!r.ok) break;
         var d=await r.json();
-        var newVids=(d.feed||[]).map(function(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;}).filter(function(p){return p&&isVid(p)&&!(p.record&&p.record.reply);});
-        setFeedVideos(function(prev){var seen=new Set(prev.map(function(p){return p.uri;}));return prev.concat(newVids.filter(function(p){return !seen.has(p.uri);}));});
-        setFeedCursor(d.cursor||null);
+        (d.feed||[]).map(mapItem2).filter(function(p){return p&&isVid(p)&&!seenNew.has(p.uri)&&!(p.record&&p.record.reply);}).forEach(function(p){newVids.push(p);seenNew.add(p.uri);});
+        cursor=d.cursor||null;
       }
+      setFeedVideos(function(prev){return prev.concat(newVids);});
+      setFeedCursor(cursor);
     }catch(e){ console.error('FeedPage loadMoreVideos:',e); }
     setFeedLoading(false);
   }
@@ -6793,7 +6842,15 @@ function PlaylistsTab(props) {
   })();
   const [plHov, setPlHov] = useState(-1);
   const [plMenuOpen, setPlMenuOpen] = useState(-1);
+  const [plMenuPos, setPlMenuPos] = useState(null);
   const [plMenuHov, setPlMenuHov] = useState('');
+  // Close playlist menu on outside click
+  useEffect(function() {
+    if (plMenuOpen < 0) return;
+    function handler() { setPlMenuOpen(-1); setPlMenuPos(null); }
+    document.addEventListener('click', handler);
+    return function() { document.removeEventListener('click', handler); };
+  }, [plMenuOpen]);
   const [plDeleting, setPlDeleting] = useState(false);
   const [sharePlaylist, setSharePlaylist] = useState(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
@@ -7010,18 +7067,33 @@ function PlaylistsTab(props) {
                   padding:'3px 7px',fontSize:13,lineHeight:1,display:'flex',alignItems:'center',borderRadius:0,transition:'background 0.1s'}}
                 onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';}}
                 onMouseLeave=${function(e){if(plMenuOpen!==i)e.currentTarget.style.background='none';}}
-                onClick=${function(e){e.stopPropagation();setPlMenuOpen(plMenuOpen===i?-1:i);}}>
+                onClick=${function(e){
+                  e.stopPropagation();
+                  if(plMenuOpen===i){setPlMenuOpen(-1);setPlMenuPos(null);return;}
+                  var rect=e.currentTarget.getBoundingClientRect();
+                  setPlMenuPos({top:rect.bottom+4,right:window.innerWidth-rect.right});
+                  setPlMenuOpen(i);
+                }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
               </button>
-              ${plMenuOpen===i?html`<div style=${{position:'absolute',bottom:'calc(100% + 4px)',right:0,background:'#1a1a1a',
-                border:'1px solid var(--accent)',minWidth:180,zIndex:500,boxShadow:'0 4px 20px rgba(0,0,0,0.7)'}} onClick=${function(e){e.stopPropagation();}}>
+              ${plMenuOpen===i&&plMenuPos?html`<div style=${{position:'fixed',top:plMenuPos.top+'px',right:plMenuPos.right+'px',background:'#1a1a1a',
+                border:'1px solid var(--accent)',minWidth:200,zIndex:9999,boxShadow:'0 4px 20px rgba(0,0,0,0.85)'}} onClick=${function(e){e.stopPropagation();}}>
+                ${props.onAddToChannelTabs?html`<button
+                  style=${{display:'block',width:'100%',padding:'10px 14px',background:plMenuHov==='addtab_'+i?'var(--accent-dim)':'none',border:'none',
+                    borderLeft:plMenuHov==='addtab_'+i?'2px solid var(--accent)':'2px solid transparent',color:'var(--accent)',fontSize:13,cursor:'pointer',
+                    textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
+                  onMouseEnter=${function(){setPlMenuHov('addtab_'+i);}}
+                  onMouseLeave=${function(){setPlMenuHov('');}}
+                  onClick=${function(e){e.stopPropagation();props.onAddToChannelTabs(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
+                  Add to Channel Tabs
+                </button>`:null}
                 <button
                   style=${{display:'block',width:'100%',padding:'10px 14px',background:plMenuHov==='share_'+i?'var(--accent-dim)':'none',border:'none',
                     borderLeft:plMenuHov==='share_'+i?'2px solid var(--accent)':'2px solid transparent',color:'var(--accent)',fontSize:13,cursor:'pointer',
                     textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
                   onMouseEnter=${function(){setPlMenuHov('share_'+i);}}
                   onMouseLeave=${function(){setPlMenuHov('');}}
-                  onClick=${function(e){e.stopPropagation();setSharePlaylist(pl);setPlMenuOpen(-1);}}>
+                  onClick=${function(e){e.stopPropagation();setSharePlaylist(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
                   Share
                 </button>
                 ${props.isOwner?html`<button
@@ -7030,7 +7102,7 @@ function PlaylistsTab(props) {
                     textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
                   onMouseEnter=${function(){setPlMenuHov('edit_'+i);}}
                   onMouseLeave=${function(){setPlMenuHov('');}}
-                  onClick=${function(e){e.stopPropagation();setEditName(pl.name||'');setEditDesc((pl.description||'').replace(/^RaccNet Playlist\n?/,'').trim());setEditErr('');setEditingPlaylist(pl);setPlMenuOpen(-1);}}>
+                  onClick=${function(e){e.stopPropagation();setEditName(pl.name||'');setEditDesc((pl.description||'').replace(/^RaccNet Playlist\n?/,'').trim());setEditErr('');setEditingPlaylist(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
                   Edit Playlist
                 </button>`:null}
                 ${props.isOwner?html`<button
@@ -7442,6 +7514,7 @@ function ThoughtActions(props) {
 // ── Channel Page ──────────────────────────────────────────────────────────────
 function ChannelPage(props) {
   const portrait = usePortrait();
+  const winW = useWindowWidth();
   const actor = props.actor;
   const [tab,         setTab]         = useState(props.initialTab || 'Content');
   const [contentSub,  setContentSub]  = useState('Videos');
@@ -7550,6 +7623,21 @@ function ChannelPage(props) {
   const [chanSavingFeed,     setChanSavingFeed]     = useState(null);
   const [chanFeedMenu,       setChanFeedMenu]       = useState(null);
   const [chanFeedMenuHov,    setChanFeedMenuHov]    = useState('');
+  // Channel tabs system
+  const [chanTabsCfg,        setChanTabsCfg]        = useState(null);   // null=not loaded, {}=loaded/no config, {...}=loaded config
+  const [chanTabsLoaded,     setChanTabsLoaded]     = useState(false);
+  const [tabDragId,          setTabDragId]          = useState(null);
+  const [tabDragOver,        setTabDragOver]        = useState(null);
+  const [tabEditId,          setTabEditId]          = useState(null);
+  const [tabEditName,        setTabEditName]        = useState('');
+  const [showAddDefaultsMenu,setShowAddDefaultsMenu]= useState(null); // null=closed, {top,right}=open
+  useEffect(function(){
+    if(!showAddDefaultsMenu) return;
+    function _closeAddDef(){ setShowAddDefaultsMenu(null); }
+    document.addEventListener('click', _closeAddDef);
+    return function(){ document.removeEventListener('click', _closeAddDef); };
+  },[!!showAddDefaultsMenu]);
+  const [plTabVids,          setPlTabVids]          = useState({});  // {uri: {loading,videos}}
   // Subscribed-to modal (follows list)
   const [showFollowsList,  setShowFollowsList]  = useState(false);
   const [followsList,      setFollowsList]      = useState(null); // null=not loaded
@@ -7631,6 +7719,25 @@ function ChannelPage(props) {
     if (d && d.did && channelFeeds === null && !channelFeedsLoading) {
       loadChannelFeeds(d.did);
     }
+  }, [d && d.did]);
+
+  // Load channel tabs config from PDS whenever the channel DID changes
+  useEffect(function() {
+    if (!d || !d.did) return;
+    var cancelled = false;
+    setChanTabsCfg(null); setChanTabsLoaded(false);
+    (async function() {
+      try {
+        var hdrs = props.session ? {headers:{Authorization:'Bearer '+props.session.accessJwt}} : {};
+        var r = await api(AUTH_PROXY+'/com.atproto.repo.getRecord?repo='+encodeURIComponent(d.did)+'&collection=raccnet.channel.tabs&rkey=self', hdrs);
+        if (!cancelled) {
+          if (r.ok) { var rd = await r.json(); setChanTabsCfg(rd.value || {}); }
+          else { setChanTabsCfg({}); }
+          setChanTabsLoaded(true);
+        }
+      } catch(e) { if (!cancelled) { setChanTabsCfg({}); setChanTabsLoaded(true); } }
+    })();
+    return function() { cancelled = true; };
   }, [d && d.did]);
 
   // Check if DM convo exists with this channel
@@ -8060,6 +8167,117 @@ function ChannelPage(props) {
     } catch(e){ setChanListMsg('Error.'); }
   }
 
+  // ── Channel tabs system helpers ─────────────────────────────────────────────
+  const CONFIGURABLE_DEFAULTS = ['Content','Reposts','Liked','Playlists','Lists','Feeds','Starter Packs'];
+
+  function getDefaultTabsCfg() {
+    var tabs = [{id:'Content',type:'default'},{id:'Reposts',type:'default'},{id:'Liked',type:'default'}];
+    if (isOwn || (channelPlaylists && channelPlaylists.length)) tabs.push({id:'Playlists',type:'default'});
+    if (channelLists && channelLists.length) tabs.push({id:'Lists',type:'default'});
+    if (channelFeeds && channelFeeds.length) tabs.push({id:'Feeds',type:'default'});
+    if (channelStPacks && channelStPacks.length) tabs.push({id:'Starter Packs',type:'default'});
+    return {tabs:tabs, hiddenDefaults:[]};
+  }
+
+  function computeEffectiveTabs() {
+    if (!chanTabsLoaded || !chanTabsCfg || !(chanTabsCfg.tabs && chanTabsCfg.tabs.length)) {
+      return getDefaultTabsCfg().tabs;
+    }
+    return (chanTabsCfg.tabs || []).filter(function(t) {
+      if (t.type === 'default') {
+        if (t.id === 'Playlists' && !isOwn && !(channelPlaylists && channelPlaylists.length)) return false;
+        if (t.id === 'Lists' && !(channelLists && channelLists.length)) return false;
+        if (t.id === 'Feeds' && !(channelFeeds && channelFeeds.length)) return false;
+        if (t.id === 'Starter Packs' && !(channelStPacks && channelStPacks.length)) return false;
+      }
+      return true;
+    });
+  }
+
+  async function saveChanTabsCfg(cfg) {
+    if (!sess || !isOwn) return;
+    try {
+      await api(AUTH_PROXY+'/com.atproto.repo.putRecord', {
+        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body:JSON.stringify({repo:sess.did, collection:'raccnet.channel.tabs', rkey:'self',
+          record:Object.assign({'$type':'raccnet.channel.tabs'}, cfg)})
+      });
+    } catch(e) { console.error('saveChanTabsCfg:', e); }
+  }
+
+  function getActiveCfg() {
+    return (chanTabsCfg && chanTabsCfg.tabs && chanTabsCfg.tabs.length) ? chanTabsCfg : getDefaultTabsCfg();
+  }
+
+  function addPlaylistTab(playlist) {
+    var tabId = 'pl:'+playlist.uri;
+    var cfg = getActiveCfg();
+    if ((cfg.tabs||[]).some(function(t){return t.id===tabId;})) return;
+    var newCfg = Object.assign({}, cfg, {tabs: cfg.tabs.concat([{id:tabId,type:'playlist',name:playlist.name||'Playlist',playlistUri:playlist.uri}])});
+    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg);
+  }
+
+  function removeTab(tabId) {
+    var cfg = getActiveCfg();
+    var newTabs = (cfg.tabs||[]).filter(function(t){return t.id!==tabId;});
+    var newHidden = (cfg.hiddenDefaults||[]).slice();
+    if (CONFIGURABLE_DEFAULTS.indexOf(tabId)>=0 && newHidden.indexOf(tabId)<0) newHidden.push(tabId);
+    var newCfg = Object.assign({}, cfg, {tabs:newTabs, hiddenDefaults:newHidden});
+    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg);
+    if (tab === tabId && newTabs.length > 0) setTab(newTabs[0].id);
+  }
+
+  function renameTab(tabId, newName) {
+    var cfg = getActiveCfg();
+    var newTabs = (cfg.tabs||[]).map(function(t){return t.id===tabId?Object.assign({},t,{name:newName}):t;});
+    var newCfg = Object.assign({}, cfg, {tabs:newTabs});
+    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg);
+  }
+
+  function reorderTabsCfg(fromId, toId) {
+    var cfg = getActiveCfg();
+    var tabs = (cfg.tabs||[]).slice();
+    var fromIdx = tabs.findIndex(function(t){return t.id===fromId;});
+    var toIdx = tabs.findIndex(function(t){return t.id===toId;});
+    if (fromIdx < 0 || toIdx < 0) return;
+    var item = tabs.splice(fromIdx, 1)[0];
+    tabs.splice(toIdx, 0, item);
+    var newCfg = Object.assign({}, cfg, {tabs:tabs});
+    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg);
+  }
+
+  function addDefaultTab(tabId) {
+    var cfg = getActiveCfg();
+    var newTabs = (cfg.tabs||[]).concat([{id:tabId,type:'default'}]);
+    var newHidden = (cfg.hiddenDefaults||[]).filter(function(h){return h!==tabId;});
+    var newCfg = Object.assign({}, cfg, {tabs:newTabs, hiddenDefaults:newHidden});
+    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg); setShowAddDefaultsMenu(false);
+  }
+
+  async function loadPlTabVids(plUri) {
+    setPlTabVids(function(prev){return Object.assign({},prev,{[plUri]:{loading:true,videos:[]}});});
+    try {
+      var did = plUri.replace('at://','').split('/')[0];
+      var hdrs = props.session?{headers:{Authorization:'Bearer '+props.session.accessJwt}}:{};
+      var r = await api(AUTH_PROXY+'/com.atproto.repo.listRecords?repo='+encodeURIComponent(did)+'&collection=raccnet.playlist.item&limit=100', hdrs);
+      if (r.ok) {
+        var atData = await r.json();
+        var atItems = (atData.records||[])
+          .filter(function(rec){return rec.value&&rec.value.listUri===plUri;})
+          .sort(function(a,b){return new Date(b.value.createdAt||0)-new Date(a.value.createdAt||0);});
+        var uris = atItems.map(function(i){return i.value.postUri;}).filter(Boolean);
+        var result = [];
+        for (var i=0;i<uris.length;i+=25) {
+          var batch=uris.slice(i,i+25);
+          var qStr=batch.map(function(u){return 'uris='+encodeURIComponent(u);}).join('&');
+          var pr=await api(PUB_PROXY+'/app.bsky.feed.getPosts?'+qStr);
+          if (pr.ok) { var pd=await pr.json(); result=result.concat((pd.posts||[]).filter(function(p){return isVid(p)||isVidRaw(p);})); }
+        }
+        setPlTabVids(function(prev){return Object.assign({},prev,{[plUri]:{loading:false,videos:result}});});
+      } else { setPlTabVids(function(prev){return Object.assign({},prev,{[plUri]:{loading:false,videos:[]}});}); }
+    } catch(e) { setPlTabVids(function(prev){return Object.assign({},prev,{[plUri]:{loading:false,videos:[]}});}); }
+  }
+
   async function openTab(t) {
     setTab(t);
     setPlaylistView(null); setStarterPackView(null);
@@ -8097,6 +8315,10 @@ function ChannelPage(props) {
         } catch(e2) {}
       }
     }
+    if (t && t.startsWith('pl:')) {
+      var plUri = t.slice(3);
+      if (!plTabVids[plUri]) loadPlTabVids(plUri);
+    }
   }
   async function openContentSub(s) {
     setContentSub(s);
@@ -8106,8 +8328,38 @@ function ChannelPage(props) {
   }
   if (channelLoading && !d) return html`<div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'50vh',color:'#aaa'}}>Loading channel...</div>`;
   if (!d) return null;
+  // Derive which configurable-default tabs are absent from the current effective tab list
+  var _effTabsNow = chanTabsLoaded ? computeEffectiveTabs() : [];
+  var _missingDefaults = isOwn && chanTabsLoaded
+    ? CONFIGURABLE_DEFAULTS.filter(function(defId){ return !_effTabsNow.some(function(t){return t.id===defId;}); })
+    : [];
   return html`<div>
     ${chanShareModalOpen?html`<${ShareModal} shareUrl=${'https://bsky.app/profile/'+(d.handle||d.did)} session=${sess} onClose=${function(){setChanShareModalOpen(false);}}/>`  :null}
+    ${showAddDefaultsMenu&&isOwn?html`<div
+      style=${{position:'fixed',top:showAddDefaultsMenu.top+'px',left:showAddDefaultsMenu.left+'px',
+        background:'#1a1a1a',border:'1px solid var(--accent)',minWidth:200,
+        zIndex:9999,boxShadow:'0 4px 20px rgba(0,0,0,0.85)'}}
+      onClick=${function(e){e.stopPropagation();}}>
+      ${_missingDefaults.map(function(tabId){
+        var isEmpty = (tabId==='Lists'&&!(channelLists&&channelLists.length))
+          || (tabId==='Feeds'&&!(channelFeeds&&channelFeeds.length))
+          || (tabId==='Starter Packs'&&!(channelStPacks&&channelStPacks.length));
+        return html`<button key=${tabId}
+          onClick=${isEmpty?function(e){e.stopPropagation();}:function(e){e.stopPropagation();addDefaultTab(tabId);}}
+          style=${{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'10px 14px',background:'none',border:'none',
+            borderLeft:'2px solid transparent',color:isEmpty?'#555':'var(--accent)',fontSize:13,
+            cursor:isEmpty?'default':'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',
+            transition:'background 0.1s',opacity:isEmpty?0.6:1}}
+          onMouseEnter=${isEmpty?null:function(e){e.currentTarget.style.background='var(--accent-dim)';e.currentTarget.style.borderLeftColor='var(--accent)';}}
+          onMouseLeave=${isEmpty?null:function(e){e.currentTarget.style.background='none';e.currentTarget.style.borderLeftColor='transparent';}}>
+          <span style=${{display:'inline-flex',alignItems:'center',gap:6}}>
+            <span style=${{display:'inline-block',width:12,color:isEmpty?'transparent':'var(--accent)'}}>+</span>
+            <span>${tabId}</span>
+          </span>
+          ${isEmpty?html`<span style=${{color:'#555',fontSize:11,fontStyle:'italic'}}>This tab is empty</span>`:null}
+        </button>`;
+      })}
+    </div>`:null}
     ${showEdit&&isOwn?html`<${EditProfileModal}
       session=${sess}
       data=${d}
@@ -8148,11 +8400,11 @@ function ChannelPage(props) {
       overflow:'hidden'}}>
       ${d.banner?html`<img src=${d.banner} alt="" style=${{width:'100%',maxHeight:320,objectFit:'cover',display:'block'}}/>`:html`<div style=${{height:240}}/>`}
     </div>
-    <div style=${{padding:portrait?'0 12px':'0 24px',borderBottom:'1px solid var(--accent)'}}>
-      <div style=${{display:'flex',alignItems:'stretch',gap:portrait?10:16,padding:'12px 0 12px'}}>
+    <div style=${{padding:portrait?'0 12px':'0 24px',borderBottom:portrait?'none':'1px solid var(--accent)'}}>
+      <div style=${{display:'flex',alignItems:'flex-start',gap:portrait?12:16,padding:portrait?'0 0 8px':'12px 0 12px'}}>
         <div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:portrait?6:8,flexShrink:0}}>
-          <${Avatar} src=${d.avatar} size=${portrait?80:192}/>
-          ${portrait?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'stretch',gap:4,width:80}}>
+          <${Avatar} src=${d.avatar} size=${portrait?Math.max(56,Math.min(100,Math.round(winW*0.22))):192}/>
+          ${false?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'stretch',gap:4,width:80}}>
             ${isOwn
               ? html`<button onClick=${function(){setShowEdit(true);}}
                   style=${{background:'#1a1a1a',border:'1px solid var(--accent)',color:'var(--accent)',padding:'5px 6px',
@@ -8161,7 +8413,7 @@ function ChannelPage(props) {
                   onMouseLeave=${function(e){e.currentTarget.style.background='#1a1a1a';}}>
                   ✏ Edit
                 </button>`
-              : html`<${SubscribeButton} did=${d.did} viewer=${d.viewer} session=${props.session}/>`
+              : html`<${SubscribeButton} did=${d.did} viewer=${d.viewer} session=${props.session} small=${true}/>`
             }
             ${!isOwn?html`<div style=${{position:'relative'}}>
               <button onClick=${function(){setChanMenuOpen(function(o){return !o;});if(!chanMenuOpen){setChanListMenu(false);setChanListMsg('');}}}
@@ -8226,16 +8478,87 @@ function ChannelPage(props) {
         </div>
         <div style=${{flex:1,minWidth:0,display:!portrait?'flex':'block',gap:8,alignItems:'stretch'}}>
           <div style=${{flex:'0 0 auto'}}>
-            <h1 style=${{color:'#f1f1f1',fontSize:portrait?18:24,fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',gap:10}}>
+            <h1 style=${{color:'#f1f1f1',fontSize:portrait?'clamp(14px,4.2vw,18px)':24,fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
               ${d.displayName||d.handle}
               ${!isOwn&&sess&&d.viewer&&d.viewer.following&&d.viewer.followedBy?html`<span style=${{fontSize:13,fontWeight:600,color:'var(--accent)',border:'1px solid var(--accent)',padding:'2px 8px',letterSpacing:0.5}}>Friends</span>`:null}
             </h1>
-            <div style=${{color:'#aaa',fontSize:portrait?12:14,whiteSpace:'nowrap'}}>@${d.handle} · ${fmt(d.followersCount||0)} subscribers · <span
-              style=${{color:'var(--accent)',cursor:'pointer'}}
-              onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>
-              ${fmt(d.followsCount||0)} subscriptions
-            </span> · ${channelVideos.length} videos</div>
-            ${d.description?html`<div style=${{color:'#aaa',fontSize:portrait?12:13,marginTop:6,lineHeight:1.6}}>${renderMarkdown(d.description.slice(0,400)+(d.description.length>400?'…':''), props.onChannel, triggerSearch)}</div>`:null}
+            ${portrait
+              ?html`<div style=${{color:'#aaa',fontSize:'clamp(10px,2.8vw,12px)',lineHeight:1.5,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>@${d.handle}</div>
+                <div style=${{color:'#aaa',fontSize:'clamp(10px,2.8vw,12px)',lineHeight:1.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                  ${fmt(d.followersCount||0)} subscribers · <span style=${{color:'var(--accent)',cursor:'pointer'}} onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>${fmt(d.followsCount||0)} subscriptions</span> · ${channelVideos.length} videos
+                </div>`
+              :html`<div style=${{color:'#aaa',fontSize:14,whiteSpace:'nowrap',lineHeight:1.6}}>@${d.handle} · ${fmt(d.followersCount||0)} subscribers · <span style=${{color:'var(--accent)',cursor:'pointer'}} onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>${fmt(d.followsCount||0)} subscriptions</span> · ${channelVideos.length} videos</div>`
+            }
+            ${portrait?html`<div style=${{display:'flex',alignItems:'center',gap:6,marginTop:8}}>
+              ${isOwn
+                ? html`<button onClick=${function(){setShowEdit(true);}}
+                    style=${{background:'#1a1a1a',border:'1px solid var(--accent)',color:'var(--accent)',padding:'5px 10px',
+                      fontWeight:600,fontSize:11,cursor:'pointer',borderRadius:0,transition:'background 0.15s'}}
+                    onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';}}
+                    onMouseLeave=${function(e){e.currentTarget.style.background='#1a1a1a';}}>✏ Edit</button>`
+                : html`<${SubscribeButton} did=${d.did} viewer=${d.viewer} session=${props.session} small=${true}/>`
+              }
+              ${!isOwn?html`<div style=${{position:'relative'}}>
+                <button onClick=${function(){setChanMenuOpen(function(o){return !o;});if(!chanMenuOpen){setChanListMenu(false);setChanListMsg('');}}}
+                  style=${{background:chanMenuOpen?'var(--accent-dim)':'none',border:'1px solid var(--accent)',color:'var(--accent)',
+                    padding:'6px 8px',cursor:'pointer',borderRadius:0,display:'flex',alignItems:'center',justifyContent:'center',
+                    transition:'background 0.12s'}}
+                  onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';}}
+                  onMouseLeave=${function(e){if(!chanMenuOpen)e.currentTarget.style.background='none';}}
+                  title="More options">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+                </button>
+                ${chanMenuOpen?html`<div style=${{position:'absolute',top:'calc(100% + 4px)',left:0,background:'#1a1a1a',
+                  border:'1px solid var(--accent)',minWidth:200,zIndex:600,boxShadow:'0 4px 20px rgba(0,0,0,0.8)'}}>
+                  <a href=${'https://bsky.app/profile/'+(d.handle||d.did)} target="_blank" rel="noopener noreferrer"
+                    style=${{display:'block',width:'100%',padding:'10px 14px',background:chanMenuHov==='bsky'?'var(--accent-dim)':'none',
+                      borderLeft:chanMenuHov==='bsky'?'2px solid var(--accent)':'2px solid transparent',
+                      color:'var(--accent)',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',
+                      textDecoration:'none',boxSizing:'border-box'}}
+                    onMouseEnter=${function(){setChanMenuHov('bsky');}} onMouseLeave=${function(){setChanMenuHov('');}}>
+                    View on Bluesky ↗
+                  </a>
+                  <button onClick=${chanShare}
+                    style=${{display:'block',width:'100%',padding:'10px 14px',background:chanMenuHov==='share'?'var(--accent-dim)':'none',
+                      border:'none',borderLeft:chanMenuHov==='share'?'2px solid var(--accent)':'2px solid transparent',
+                      color:'var(--accent)',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif'}}
+                    onMouseEnter=${function(){setChanMenuHov('share');}} onMouseLeave=${function(){setChanMenuHov('');}}>
+                    Share Channel
+                  </button>
+                  ${sess?html`<div style=${{position:'relative'}}>
+                    <button onClick=${function(){setChanListMenu(function(o){return !o;});if(!chanListMenu)loadChanLists();}}
+                      style=${{display:'block',width:'100%',padding:'10px 14px',background:chanMenuHov==='list'?'var(--accent-dim)':'none',
+                        border:'none',borderLeft:chanMenuHov==='list'?'2px solid var(--accent)':'2px solid transparent',
+                        color:'var(--accent)',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif'}}
+                      onMouseEnter=${function(){setChanMenuHov('list');}} onMouseLeave=${function(){setChanMenuHov('');}}>
+                      Add to List ›
+                    </button>
+                    ${chanListMenu?html`<div style=${{position:'absolute',top:0,left:'100%',marginLeft:4,background:'#1a1a1a',
+                      border:'1px solid var(--accent)',minWidth:180,zIndex:601,boxShadow:'0 4px 20px rgba(0,0,0,0.8)',maxHeight:240,overflowY:'auto'}}>
+                      ${chanListMsg?html`<div style=${{padding:'6px 12px',fontSize:12,color:'var(--accent)'}}>${chanListMsg}</div>`:null}
+                      ${chanListsLoading?html`<div style=${{padding:'10px 14px',color:'#aaa',fontSize:12}}>Loading…</div>`:null}
+                      ${chanLists&&chanLists.length===0?html`<div style=${{padding:'10px 14px',color:'#555',fontSize:12}}>No lists yet.</div>`:null}
+                      ${(chanLists||[]).map(function(l,li){return html`<button key=${l.uri}
+                        onClick=${function(){addChanToList(l.uri);}}
+                        style=${{display:'block',width:'100%',padding:'9px 14px',background:'none',border:'none',
+                          borderLeft:'2px solid transparent',color:'var(--accent)',fontSize:13,cursor:'pointer',
+                          textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
+                        onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';e.currentTarget.style.borderLeftColor='var(--accent)';}}
+                        onMouseLeave=${function(e){e.currentTarget.style.background='none';e.currentTarget.style.borderLeftColor='transparent';}}>
+                        ${l.name||'Unnamed List'}
+                      </button>`;})}</div>`:null}
+                  </div>`:null}
+                  ${sess?html`<button onClick=${chanBlockToggle}
+                    style=${{display:'block',width:'100%',padding:'10px 14px',background:chanMenuHov==='block'?'rgba(244,68,68,0.12)':'none',
+                      border:'none',borderLeft:chanMenuHov==='block'?'2px solid #f44':'2px solid transparent',
+                      color:'#f87171',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif'}}
+                    onMouseEnter=${function(){setChanMenuHov('block');}} onMouseLeave=${function(){setChanMenuHov('');}}>
+                    ${chanBlockLoading?'Please wait…':chanBlocked?'Unblock @'+d.handle:'Block @'+d.handle}
+                  </button>`:null}
+                </div>`:null}
+              </div>`:null}
+            </div>`:null}
+            ${!portrait&&d.description?html`<div style=${{color:'#aaa',fontSize:13,marginTop:6,lineHeight:1.6}}>${renderMarkdown(d.description.slice(0,400)+(d.description.length>400?'…':''), props.onChannel, triggerSearch)}</div>`:null}
           </div>
           ${!portrait?(function(){
             var shouldShow = thoughtsHide !== 'all' &&
@@ -8365,6 +8688,7 @@ function ChannelPage(props) {
           </div>`:null}
         </div>`:null}
       </div>
+      ${portrait&&d.description?html`<div style=${{color:'#aaa',fontSize:'clamp(10px,2.8vw,12px)',lineHeight:1.6,padding:'0 0 10px',wordBreak:'break-word'}}>${renderMarkdown(d.description.slice(0,400)+(d.description.length>400?'…':''), props.onChannel, triggerSearch)}</div>`:null}
       ${portrait?(function(){
         var shouldShow = thoughtsHide !== 'all' &&
           ((isOwn && sess && thoughtsHide !== 'own') || (!isOwn && thoughtsEnabled));
@@ -8372,7 +8696,7 @@ function ChannelPage(props) {
         var headingText = thoughtsHeading !== undefined && !thoughtsLoading ? (thoughtsHeading || ((d.displayName||d.handle)+"'s Thoughts")) : null;
         return html`<div style=${{padding:'0 12px 12px 12px'}}>
           ${headingText?html`<div style=${{fontSize:13,fontWeight:600,color:'var(--accent)',marginBottom:6,letterSpacing:0.3}}>${headingText}</div>`:html`<div style=${{height:21,marginBottom:6}}/>`}
-          <div style=${{border:'1px solid var(--accent)',height:180,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+          <div style=${{border:'1px solid var(--accent)',height:110,display:'flex',flexDirection:'column',overflow:'hidden'}}>
             <div style=${{flex:1,minHeight:0,overflowY:'auto',overscrollBehavior:'contain',scrollbarWidth:'thin',scrollbarColor:'var(--accent) transparent'}}>
               ${thoughtsLoading?html`<div style=${{padding:'14px 12px',color:'#555',fontSize:13,textAlign:'center'}}>Loading…</div>`:null}
               ${!thoughtsLoading&&!thoughtsPosts.length&&isOwn?html`<div style=${{padding:'14px 12px',color:'#555',fontSize:12,textAlign:'center'}}>${thoughtsHeading?'No posts yet.':'No thoughts yet.'}</div>`:null}
@@ -8419,24 +8743,94 @@ function ChannelPage(props) {
           </div>
         </div>`;
       })():null}
-      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-        <div style=${{display:'flex',overflowX:portrait?'auto':'visible',scrollbarWidth:'none',msOverflowStyle:'none',flex:1,minWidth:0}}>
+      <div style=${{display:'flex',flexDirection:portrait?'column':'row',alignItems:portrait?'stretch':'center',justifyContent:'space-between'}}>
+        <div style=${{display:'flex',overflowX:'auto',scrollbarWidth:'none',msOverflowStyle:'none',flex:1,minWidth:0,alignItems:'stretch',borderBottom:portrait?'1px solid var(--accent)':'none'}}>
           ${(function(){
-            var tabs = ['Content','Reposts','Liked'];
-            if (sess&&!isOwn&&hasDMs) tabs.push('DMs');
-            if (isOwn || (channelPlaylists&&channelPlaylists.length)) tabs.push('Playlists');
-            if (channelLists&&channelLists.length) tabs.push('Lists');
-            if (channelFeeds&&channelFeeds.length) tabs.push('Feeds');
-            if (channelStPacks&&channelStPacks.length) tabs.push('Starter Packs');
-            return tabs.map(function(t){return html`<button key=${t} onClick=${function(){openTab(t);}}
-              style=${{padding:portrait?'10px 14px':'12px 20px',background:'none',border:'none',color:tab===t?'var(--accent)':'#aaa',
-                fontSize:portrait?13:14,fontWeight:tab===t?500:400,borderBottom:'3px solid '+(tab===t?'var(--accent)':'transparent'),cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>${t}</button>`;});
+            var effTabs = _effTabsNow;
+            // Also include DMs (non-configurable, always at end if conditions met)
+            var showDMs = sess&&!isOwn&&hasDMs;
+            // Build rendered tab elements
+            var tabEls = effTabs.map(function(t){
+              var isActive = tab===t.id;
+              var dispName = t.name||(t.id.startsWith('pl:')?'Playlist':t.id);
+              return html`<div key=${t.id}
+                draggable=${!!isOwn&&!tabEditId&&t.id!=='DMs'}
+                onDragStart=${isOwn&&!tabEditId&&t.id!=='DMs'?function(e){setTabDragId(t.id);e.dataTransfer.effectAllowed='move';}:null}
+                onDragOver=${isOwn&&t.id!=='DMs'?function(e){e.preventDefault();setTabDragOver(t.id);}:null}
+                onDragLeave=${isOwn?function(){setTabDragOver(null);}:null}
+                onDrop=${isOwn&&t.id!=='DMs'?function(e){e.preventDefault();if(tabDragId&&tabDragId!==t.id)reorderTabsCfg(tabDragId,t.id);setTabDragId(null);setTabDragOver(null);}:null}
+                onDragEnd=${isOwn?function(){setTabDragId(null);setTabDragOver(null);}:null}
+                style=${{display:'flex',alignItems:'center',flexShrink:0,position:'relative',
+                  borderBottom:'3px solid '+(isActive?'var(--accent)':'transparent'),
+                  opacity:tabDragId===t.id?0.4:1,
+                  background:tabDragOver===t.id?'var(--accent-dim)':'none',
+                  cursor:isOwn&&tabEditId!==t.id?'grab':'pointer'}}>
+                ${isOwn&&isActive&&tabEditId!==t.id&&t.id!=='DMs'?html`<button
+                  title="Rename tab"
+                  onClick=${function(e){e.stopPropagation();setTabEditId(t.id);setTabEditName(dispName);}}
+                  style=${{position:'absolute',left:-4,top:'50%',transform:'translateY(-50%)',
+                    background:'none',border:'none',color:'var(--accent)',cursor:'pointer',
+                    padding:'3px 4px',fontSize:13,lineHeight:1,opacity:0.75,zIndex:1}}
+                  onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+                  onMouseLeave=${function(e){e.currentTarget.style.opacity='0.75';}}>✎</button>`:null}
+                ${tabEditId===t.id&&isOwn
+                  ?html`<input autoFocus value=${tabEditName}
+                    onInput=${function(e){setTabEditName(e.target.value);}}
+                    onKeyDown=${function(e){
+                      if(e.key==='Enter'){e.preventDefault();if(tabEditName.trim())renameTab(t.id,tabEditName.trim());setTabEditId(null);}
+                      if(e.key==='Escape'){setTabEditId(null);}
+                    }}
+                    onBlur=${function(){if(tabEditName.trim())renameTab(t.id,tabEditName.trim());setTabEditId(null);}}
+                    onClick=${function(e){e.stopPropagation();}}
+                    style=${{background:'transparent',border:'none',borderBottom:'1px solid var(--accent)',
+                      color:'var(--accent)',fontSize:portrait?13:14,fontWeight:500,
+                      padding:portrait?'10px 4px':'12px 4px',fontFamily:'Roboto,sans-serif',
+                      outline:'none',width:Math.max(60,(tabEditName.length||4)*9)+'px',minWidth:60,maxWidth:160}}/>`
+                  :html`<button onClick=${function(){openTab(t.id);}}
+                    style=${{padding:portrait?'10px 8px':'12px 14px',background:'none',border:'none',
+                      color:isActive?'var(--accent)':'#aaa',fontSize:portrait?13:14,
+                      fontWeight:isActive?500:400,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>
+                    ${dispName}
+                  </button>`}
+                ${isOwn&&isActive&&tabEditId!==t.id&&t.id!=='DMs'?html`<button
+                  title="Remove tab"
+                  onClick=${function(e){e.stopPropagation();removeTab(t.id);}}
+                  style=${{position:'absolute',right:-4,top:'50%',transform:'translateY(-50%)',
+                    background:'none',border:'none',color:'var(--accent)',cursor:'pointer',
+                    padding:'3px 4px',fontSize:13,lineHeight:1,opacity:0.75,zIndex:1}}
+                  onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+                  onMouseLeave=${function(e){e.currentTarget.style.opacity='0.75';}}>✕</button>`:null}
+              </div>`;
+            });
+            // Add DMs tab if applicable (non-draggable/configurable)
+            if (showDMs) {
+              tabEls = tabEls.concat(html`<button key="DMs" onClick=${function(){openTab('DMs');}}
+                style=${{padding:portrait?'10px 14px':'12px 20px',background:'none',border:'none',
+                  color:tab==='DMs'?'var(--accent)':'#aaa',fontSize:portrait?13:14,
+                  fontWeight:tab==='DMs'?500:400,borderBottom:'3px solid '+(tab==='DMs'?'var(--accent)':'transparent'),
+                  cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>DMs</button>`);
+            }
+            // Add + button at far right for restoring hidden defaults (owner only)
+            if (isOwn&&_missingDefaults.length>0) {
+              tabEls = tabEls.concat(html`<button key="__adddef"
+                onClick=${function(e){e.stopPropagation();if(showAddDefaultsMenu){setShowAddDefaultsMenu(null);return;}var rect=e.currentTarget.getBoundingClientRect();var left=rect.left;var maxLeft=window.innerWidth-220;setShowAddDefaultsMenu({top:rect.bottom+4,left:Math.min(left,maxLeft)});}}
+                title="Add back removed tabs"
+                style=${{padding:portrait?'10px 12px':'12px 14px',background:'none',border:'none',
+                  color:'var(--accent)',fontSize:portrait?15:17,fontWeight:600,cursor:'pointer',
+                  flexShrink:0,opacity:0.7,borderBottom:'3px solid transparent',lineHeight:1}}
+                onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+                onMouseLeave=${function(e){e.currentTarget.style.opacity='0.7';}}>+</button>`);
+            }
+            if (!chanTabsLoaded) {
+              return html`<div style=${{padding:'12px 20px',color:'#555',fontSize:13}}>Loading tabs…</div>`;
+            }
+            return tabEls;
           })()}
         </div>
-        ${(tab==='Content'||tab==='Reposts')?html`<div style=${{display:'flex',alignItems:'center',gap:4,marginRight:8}}>
+        ${(tab==='Content'||tab==='Reposts')?html`<div style=${{display:'flex',alignItems:'center',gap:4,marginRight:portrait?0:8,marginLeft:portrait?'auto':0,padding:portrait?'4px 4px':0}}>
           <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory}/>
-          <button onClick=${function(){openContentSub('Videos');}} style=${{padding:'6px 14px',background:contentSub==='Videos'?'var(--accent)':'none',color:contentSub==='Videos'?'#000':'#aaa',border:'none',fontSize:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>Videos</button>
-          <button onClick=${function(){openContentSub('Posts');}}  style=${{padding:'6px 14px',background:contentSub==='Posts'?'var(--accent)':'none',color:contentSub==='Posts'?'#000':'#aaa',border:'none',fontSize:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>Posts</button>
+          <button onClick=${function(){openContentSub('Videos');}} style=${{padding:portrait?'4px 10px':'6px 14px',background:contentSub==='Videos'?'var(--accent)':'none',color:contentSub==='Videos'?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>Videos</button>
+          <button onClick=${function(){openContentSub('Posts');}}  style=${{padding:portrait?'4px 10px':'6px 14px',background:contentSub==='Posts'?'var(--accent)':'none',color:contentSub==='Posts'?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>Posts</button>
         </div>`:null}
       </div>
     </div>
@@ -8506,7 +8900,19 @@ function ChannelPage(props) {
         onRemovedFromPlaylist=${function(plUri,postUri){setPlaylistVids(function(prev){return prev.filter(function(p){return p.uri!==postUri;});});}}
         onDeletePlaylist=${function(plUri){setChannelPlaylists(function(prev){return (prev||[]).filter(function(p){return p.uri!==plUri;});});}}
         onEditPlaylist=${function(plUri,newName,newDesc){setChannelPlaylists(function(prev){return (prev||[]).map(function(p){return p.uri===plUri?Object.assign({},p,{name:newName,description:'RaccNet Playlist\n'+newDesc}):p;});});if(playlistView&&playlistView.uri===plUri){setPlaylistView(function(pv){return pv?Object.assign({},pv,{name:newName,description:'RaccNet Playlist\n'+newDesc}):pv;});}}}
+        onAddToChannelTabs=${isOwn?addPlaylistTab:null}
         onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
+      ${(function(){
+        if(!tab||!tab.startsWith('pl:')) return null;
+        var plUri=tab.slice(3);
+        var ptd=plTabVids[plUri]||{loading:true,videos:[]};
+        if(ptd.loading) return html`<div style=${{color:'#aaa',padding:'32px 0',textAlign:'center'}}>Loading playlist…</div>`;
+        if(!ptd.videos||!ptd.videos.length) return html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'30vh',gap:12,color:'#aaa'}}>
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="#3f3f3f"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
+          <p style=${{fontSize:14}}>No videos in this playlist.</p>
+        </div>`;
+        return html`<${VideoGrid} videos=${ptd.videos} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
+      })()}
       ${tab==='Lists'?html`<${ListsTab} lists=${channelLists||[]} loading=${listsLoading} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
       ${tab==='Starter Packs'&&!starterPackView?html`<${StarterPacksTab} packs=${channelStPacks||[]} loading=${stPacksLoading}
         onOpenPack=${function(sp){setStarterPackView(sp);}}/>`:null}
@@ -9364,7 +9770,7 @@ function App() {
   const mL = portrait ? 0 : (sidebarOpen?240:72);
   const uploadBarH = uploadState ? 64 : 0;
   // Auto-reopen sidebar when rotating back to landscape
-  useEffect(function(){ if(!portrait) setSidebarOpen(true); }, [portrait]);
+  useEffect(function(){ if(!portrait) setSidebarOpen(true); else setSidebarOpen(false); }, [portrait]);
 
   // Determine current page type for sidebar highlighting
   var _activeKey = navHistory.current[navIdx]||'page:search';
