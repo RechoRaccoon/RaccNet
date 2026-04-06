@@ -1140,7 +1140,7 @@ function Header(props) {
   const portrait = usePortrait();
   function submit(e) { e.preventDefault(); if (props.input.trim()) props.onSearch(props.input.trim()); }
   return html`<header style=${{position:'fixed',top:0,left:0,right:0,height:56,background:'#0f0f0f',
-    display:'flex',alignItems:'center',padding:portrait?'0 6px':'0 16px',gap:portrait?4:16,zIndex:200,borderBottom:'1px solid var(--accent)',overflow:'hidden'}}>
+    display:'flex',alignItems:'center',padding:portrait?'0 6px':'0 16px',gap:portrait?4:16,zIndex:200,borderBottom:'1px solid var(--accent)'}}>
     <div style=${{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
       ${portrait?html`<button onClick=${props.toggleSidebar} title="Menu"
         style=${{background:'none',border:'none',color:'#f1f1f1',padding:8,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}
@@ -1653,10 +1653,10 @@ function NotificationBell(props) {
         ${unread>9?'9+':unread}
       </div>`:null}
     </button>
-    ${open?html`<div style=${{position:'absolute',top:'calc(100% + 6px)',right:0,
+    ${open?html`<div style=${{position:'fixed',top:62,right:16,
       width:360,maxHeight:480,overflowY:'auto',
       background:'#1a1a1a',border:'1px solid var(--accent)',
-      zIndex:1000,boxShadow:'0 8px 32px rgba(0,0,0,0.8)'}}>
+      zIndex:9999,boxShadow:'0 8px 32px rgba(0,0,0,0.8)'}}>
       <div style=${{padding:'10px 16px',borderBottom:'1px solid #2a2a2a',
         fontSize:13,fontWeight:700,color:'var(--accent)'}}>Notifications</div>
       ${loading?html`<div style=${{padding:20,textAlign:'center',color:'#aaa',fontSize:13}}>Loading…</div>`:
@@ -1840,6 +1840,8 @@ function loadAccent(){ try{return localStorage.getItem(ACCENT_KEY)||'#00FF07';}c
 function saveAccent(v){ try{localStorage.setItem(ACCENT_KEY,v);}catch(e){} }
 function loadFilter(){ try{return localStorage.getItem(FILTER_KEY)||'all';}catch(e){return 'all';} }
 function saveFilter(v){ try{localStorage.setItem(FILTER_KEY,v);}catch(e){} }
+function loadThoughtsHide(){ try{return localStorage.getItem('raccnet_thoughts_hide')||'';}catch(e){return '';} }
+function saveThoughtsHide(v){ try{if(v)localStorage.setItem('raccnet_thoughts_hide',v);else localStorage.removeItem('raccnet_thoughts_hide');}catch(e){} }
 const MOBILECOLS_KEY = 'raccnet_mobilecols';
 function loadMobileCols(){ try{var v=parseInt(localStorage.getItem(MOBILECOLS_KEY));return (v>=1&&v<=5)?v:1;}catch(e){return 1;} }
 function saveMobileCols(v){ try{localStorage.setItem(MOBILECOLS_KEY,String(v));window.dispatchEvent(new CustomEvent("raccnet_mobilecols",{detail:v}));}catch(e){} }
@@ -3006,6 +3008,26 @@ function SettingsPage(props) {
       </div>
       <div style=${{color:'#555',fontSize:12,marginTop:8}}>${mobileCols === 1 ? 'Full width' : mobileCols === 2 ? 'Default (2 columns)' : mobileCols+' columns — smaller cards'}</div>
     </div>`)}
+
+    ${(function(){
+      var [thoughtsHideSetting, setThoughtsHideSetting] = useState(function(){return loadThoughtsHide();});
+      function setAndSave(v){setThoughtsHideSetting(v);saveThoughtsHide(v);}
+      return section('Channel Thoughts', html`<div>
+        <div style=${{color:'#aaa',fontSize:13,marginBottom:12}}>Control visibility of the Thoughts section on channel pages.</div>
+        <div style=${{display:'flex',gap:6,flexWrap:'wrap'}}>
+          ${[['','Show on all channels'],['own','Hide on my channel only'],['all','Hide on all channels']].map(function(opt){
+            var isActive=thoughtsHideSetting===opt[0];
+            return html`<button key=${opt[0]} onClick=${function(){setAndSave(opt[0]);}}
+              style=${{padding:'8px 16px',border:'1px solid '+(isActive?'var(--accent)':'#3f3f3f'),
+                background:isActive?'var(--accent)':'none',color:isActive?'#000':'#aaa',
+                fontSize:13,cursor:'pointer',borderRadius:0,fontWeight:isActive?700:400,transition:'all 0.15s'}}>
+              ${opt[1]}
+            </button>`;
+          })}
+        </div>
+        <div style=${{color:'#555',fontSize:12,marginTop:8}}>This is a local setting — it only affects your view of RaccNet.</div>
+      </div>`);
+    })()}
 
     ${section('Content Filter', html`<div>
       <div style=${{color:'#aaa',fontSize:13,marginBottom:12}}>Control which content appears across all feeds and tabs.</div>
@@ -5574,14 +5596,15 @@ function UploadBar(props) {
 function EditProfileModal(props) {
   const sess = props.session;
   const d    = props.data; // current profile data
-  const [displayName, setDisplayName] = useState(d.displayName || '');
-  const [bio,         setBio]         = useState(d.description || '');
-  const [avatarFile,  setAvatarFile]  = useState(null);
-  const [avatarUrl,   setAvatarUrl]   = useState(d.avatar || null);
-  const [bannerFile,  setBannerFile]  = useState(null);
-  const [bannerUrl,   setBannerUrl]   = useState(d.banner || null);
-  const [saving,      setSaving]      = useState(false);
-  const [err,         setErr]         = useState('');
+  const [displayName,     setDisplayName]     = useState(d.displayName || '');
+  const [bio,             setBio]             = useState(d.description || '');
+  const [avatarFile,      setAvatarFile]      = useState(null);
+  const [avatarUrl,       setAvatarUrl]       = useState(d.avatar || null);
+  const [bannerFile,      setBannerFile]      = useState(null);
+  const [bannerUrl,       setBannerUrl]       = useState(d.banner || null);
+  const [thoughtsHeading, setThoughtsHeading] = useState(props.thoughtsHeading || '');
+  const [saving,          setSaving]          = useState(false);
+  const [err,             setErr]             = useState('');
 
   function onAvatarChange(e) {
     const f = e.target.files && e.target.files[0];
@@ -5643,14 +5666,23 @@ function EditProfileModal(props) {
       });
       if (!putRes.ok) throw new Error('Profile update failed: '+(await putRes.text()));
 
-      props.onSaved({ displayName: displayName.trim(), description: bio.trim(), avatar: avatarUrl, banner: bannerUrl });
+      // Save thoughts heading to raccnet.channel.settings
+      await api(AUTH_PROXY+'/com.atproto.repo.putRecord', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body:JSON.stringify({repo:sess.did, collection:'raccnet.channel.settings', rkey:'self',
+          record:{'$type':'raccnet.channel.settings', thoughtsHeading:thoughtsHeading.trim()}})
+      });
+
+      props.onSaved({ displayName: displayName.trim(), description: bio.trim(), avatar: avatarUrl, banner: bannerUrl,
+        thoughtsHeading: thoughtsHeading.trim() });
     } catch(e) {
       setErr(e.message || 'Save failed');
     }
     setSaving(false);
   }
 
-  const iSt = {width:'100%',padding:'10px 14px',background:'#121212',border:'1px solid #3f3f3f',
+  const iSt = {width:'100%',padding:'10px 14px',background:'#121212',border:'1px solid var(--accent)',
     color:'#f1f1f1',fontSize:14,boxSizing:'border-box',borderRadius:0};
   const fileLabelSt = function(chosen) { return {
     display:'flex',alignItems:'center',gap:12,padding:'12px 16px',
@@ -5666,14 +5698,14 @@ function EditProfileModal(props) {
         maxHeight:'90vh',overflowY:'auto',boxShadow:'0 20px 60px rgba(0,0,0,0.8)'}}>
 
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:24}}>
-        <h2 style=${{color:'#f1f1f1',fontSize:18,fontWeight:700}}>Edit Profile</h2>
+        <h2 style=${{color:'var(--accent)',fontSize:18,fontWeight:700}}>Edit Channel</h2>
         ${!saving?html`<button onClick=${props.onClose}
-          style=${{background:'none',border:'none',color:'#666',fontSize:22,padding:'0 4px',cursor:'pointer'}}
-          onMouseEnter=${function(e){e.currentTarget.style.color='#f1f1f1';}}
-          onMouseLeave=${function(e){e.currentTarget.style.color='#666';}}>✕</button>`:null}
+          style=${{background:'none',border:'none',color:'var(--accent)',fontSize:22,padding:'0 4px',cursor:'pointer',opacity:0.7}}
+          onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+          onMouseLeave=${function(e){e.currentTarget.style.opacity='0.7';}}>✕</button>`:null}
       </div>
       <div style=${{marginBottom:20}}>
-        <label style=${{display:'block',color:'#aaa',fontSize:13,fontWeight:500,marginBottom:8}}>Banner Image</label>
+        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Banner Image</label>
         ${bannerUrl?html`<img src=${bannerUrl} style=${{width:'100%',height:120,objectFit:'cover',display:'block',marginBottom:8,border:'1px solid #272727'}}/>`:null}
         <label style=${fileLabelSt(!!bannerFile)}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill=${bannerFile?'var(--accent)':'#555'}><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
@@ -5682,7 +5714,7 @@ function EditProfileModal(props) {
         </label>
       </div>
       <div style=${{marginBottom:20}}>
-        <label style=${{display:'block',color:'#aaa',fontSize:13,fontWeight:500,marginBottom:8}}>Profile Picture</label>
+        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Profile Picture</label>
         <div style=${{display:'flex',alignItems:'center',gap:16,marginBottom:8}}>
           ${avatarUrl?html`<img src=${avatarUrl} style=${{width:60,height:60,borderRadius:'50%',objectFit:'cover',border:'2px solid #272727'}}/>`:null}
           <label style=${Object.assign({},fileLabelSt(!!avatarFile),{flex:1})}>
@@ -5693,20 +5725,23 @@ function EditProfileModal(props) {
         </div>
       </div>
       <div style=${{marginBottom:16}}>
-        <label style=${{display:'block',color:'#aaa',fontSize:13,fontWeight:500,marginBottom:8}}>Display Name</label>
+        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Display Name</label>
         <input value=${displayName} onInput=${function(e){setDisplayName(e.target.value);}} maxlength="64"
-          placeholder="Your display name" style=${iSt} disabled=${saving}
-          onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
-          onBlur=${function(e){e.target.style.borderColor='#3f3f3f';}}/>
+          placeholder="Your display name" style=${iSt} disabled=${saving}/>
       </div>
       <div style=${{marginBottom:24}}>
-        <label style=${{display:'block',color:'#aaa',fontSize:13,fontWeight:500,marginBottom:8}}>Bio</label>
+        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Bio</label>
         <textarea value=${bio} onInput=${function(e){setBio(e.target.value);}} maxlength="256"
           placeholder="Tell people about yourself" rows="4"
-          style=${Object.assign({},iSt,{resize:'vertical'})} disabled=${saving}
-          onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
-          onBlur=${function(e){e.target.style.borderColor='#3f3f3f';}}/>
+          style=${Object.assign({},iSt,{resize:'vertical'})} disabled=${saving}/>
         <div style=${{textAlign:'right',fontSize:11,color:'#555',marginTop:3}}>${bio.length}/256</div>
+      </div>
+      <div style=${{marginBottom:24}}>
+        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Thoughts Section Heading</label>
+        <input value=${thoughtsHeading} onInput=${function(e){setThoughtsHeading(e.target.value);}} maxlength="80"
+          placeholder=${'e.g. '+(d.displayName||d.handle)+"'s Thoughts"}
+          style=${iSt} disabled=${saving}/>
+        <div style=${{fontSize:11,color:'#555',marginTop:4}}>The label shown above your thoughts box. Leave blank for the default.</div>
       </div>
 
       ${err?html`<div style=${{background:'#1a0000',border:'1px solid #882222',padding:'10px 14px',
@@ -5716,7 +5751,7 @@ function EditProfileModal(props) {
         style=${{width:'100%',padding:14,background:saving?'var(--accent-solid-dim)':'var(--accent)',color:saving?'var(--accent)':'#000',
           border:'none',fontSize:15,fontWeight:700,borderRadius:0,
           opacity:saving?0.7:1,cursor:saving?'not-allowed':'pointer'}}>
-        ${saving?'Saving…':'Save Profile'}
+        ${saving?'Saving…':'Save Channel'}
       </button>
     </div>
   </div>`;
@@ -7347,6 +7382,63 @@ function StarterPackView(props) {
 }
 
 
+// ── ThoughtActions — like/repost buttons for a single thought post ────────────
+function ThoughtActions(props) {
+  const post = props.post;
+  const sess = props.session;
+  const [liked,      setLiked]      = useState(!!(post.viewer&&post.viewer.like));
+  const [likeUri,    setLikeUri]    = useState((post.viewer&&post.viewer.like)||null);
+  const [likeCount,  setLikeCount]  = useState(post.likeCount||0);
+  const [reposted,   setReposted]   = useState(!!(post.viewer&&post.viewer.repost));
+  const [repostUri,  setRepostUri]  = useState((post.viewer&&post.viewer.repost)||null);
+  const [repostCount,setRepostCount]= useState(post.repostCount||0);
+
+  async function toggleLike() {
+    if (!sess) return;
+    if (liked) {
+      setLiked(false); setLikeCount(function(n){return n-1;});
+      var rkey = likeUri&&likeUri.split('/').pop(); setLikeUri(null);
+      if (rkey) await bskyDelete(sess,'app.bsky.feed.like',rkey);
+    } else {
+      setLiked(true); setLikeCount(function(n){return n+1;});
+      var uri = await bskyCreate(sess,'app.bsky.feed.like',{'$type':'app.bsky.feed.like',subject:{uri:post.uri,cid:post.cid},createdAt:new Date().toISOString()});
+      setLikeUri(uri);
+    }
+  }
+  async function toggleRepost() {
+    if (!sess) return;
+    if (reposted) {
+      setReposted(false); setRepostCount(function(n){return n-1;});
+      var rkey = repostUri&&repostUri.split('/').pop(); setRepostUri(null);
+      if (rkey) await bskyDelete(sess,'app.bsky.feed.repost',rkey);
+    } else {
+      setReposted(true); setRepostCount(function(n){return n+1;});
+      var uri = await bskyCreate(sess,'app.bsky.feed.repost',{'$type':'app.bsky.feed.repost',subject:{uri:post.uri,cid:post.cid},createdAt:new Date().toISOString()});
+      setRepostUri(uri);
+    }
+  }
+
+  const bSt = function(active) { return {background:'var(--accent-solid-dim)',border:'1px solid '+(active?'var(--accent)':'#333'),
+    color:'var(--accent)',padding:'3px 7px',borderRadius:0,fontSize:11,display:'flex',alignItems:'center',
+    gap:4,cursor:sess?'pointer':'default',transition:'background 0.15s, color 0.15s'}; };
+  const bOver = function(active){return function(e){if(!active){e.currentTarget.style.background='var(--accent)';e.currentTarget.style.color='#000';}};};
+  const bOut  = function(active){return function(e){e.currentTarget.style.background='var(--accent-solid-dim)';e.currentTarget.style.color='var(--accent)';e.currentTarget.style.borderColor=active?'var(--accent)':'#333';};};
+
+  return html`<div style=${{display:'flex',gap:4,flexShrink:0}}>
+    <button onClick=${toggleLike} style=${bSt(liked)} onMouseEnter=${bOver(liked)} onMouseLeave=${bOut(liked)}
+      title=${liked?'Unlike':'Like'}>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>
+      ${fmt(likeCount)}
+    </button>
+    <button onClick=${toggleRepost} style=${bSt(reposted)} onMouseEnter=${bOver(reposted)} onMouseLeave=${bOut(reposted)}
+      title=${reposted?'Undo repost':'Repost'}>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+      ${fmt(repostCount)}
+    </button>
+  </div>`;
+}
+
+
 // ── Channel Page ──────────────────────────────────────────────────────────────
 function ChannelPage(props) {
   const portrait = usePortrait();
@@ -7406,6 +7498,19 @@ function ChannelPage(props) {
       if(!cancelled) setChannelLoading(false);
     })();
     return function(){cancelled=true;};
+  },[actor]);
+  // Load thoughts when actor changes
+  useEffect(function(){
+    if(!actor) return;
+    setThoughtsPosts([]); setThoughtsEnabled(false); setThoughtsHeading(undefined);
+    // resolve actor to DID then load thoughts
+    (async function(){
+      try {
+        var hdrs = props.session ? {headers:{Authorization:'Bearer '+props.session.accessJwt}} : {};
+        var pr = await api((props.session?AUTH_PROXY:PUB_PROXY)+'/app.bsky.actor.getProfile?actor='+encodeURIComponent(actor), hdrs);
+        if (pr.ok) { var pd = await pr.json(); if (pd.did) loadThoughts(pd.did); }
+      } catch(e) {}
+    })();
   },[actor]);
   // Smooth scroll to bottom when DMs tab is active (via initialTab or navigation)
   useEffect(function(){
@@ -7471,6 +7576,15 @@ function ChannelPage(props) {
   const [composeImgBlob,setComposeImgBlob]= useState(null);
   const [composing,     setComposing]     = useState(false);
   const composeFileRef = useRef(null);
+  // Channel Thoughts state
+  const [thoughtsPosts,      setThoughtsPosts]      = useState([]);
+  const [thoughtsLoading,    setThoughtsLoading]    = useState(false);
+  const [thoughtsEnabled,    setThoughtsEnabled]    = useState(false);
+  const [thoughtsHeading,    setThoughtsHeading]    = useState(undefined);
+  const [thoughtsInput,      setThoughtsInput]      = useState('');
+  const [thoughtsSubmitting, setThoughtsSubmitting] = useState(false);
+  const [thoughtsErr,        setThoughtsErr]        = useState('');
+  const [thoughtsHide,       setThoughtsHide]       = useState(function(){return loadThoughtsHide();});
   const d    = profileData;
   const sess = props.session;
   const isOwn = sess && d && sess.did === d.did;
@@ -7615,6 +7729,98 @@ function ChannelPage(props) {
       }
     } catch(e){ console.error(e); }
     setComposing(false);
+  }
+
+  async function loadThoughts(did) {
+    if (!did) return;
+    setThoughtsLoading(true);
+    setThoughtsEnabled(false);
+    try {
+      var hdrs = sess ? {headers:{Authorization:'Bearer '+sess.accessJwt}} : {};
+      var r = await api(AUTH_PROXY+'/com.atproto.repo.listRecords?repo='+encodeURIComponent(did)+'&collection=raccnet.channel.post&limit=50', hdrs);
+      if (!r.ok) { setThoughtsLoading(false); return; }
+      var data = await r.json();
+      var records = data.records || [];
+      if (!records.length && !(sess && sess.did === did)) { setThoughtsLoading(false); return; }
+      setThoughtsEnabled(records.length > 0);
+      try {
+        var sr = await api(AUTH_PROXY+'/com.atproto.repo.getRecord?repo='+encodeURIComponent(did)+'&collection=raccnet.channel.settings&rkey=self', hdrs);
+        if (sr.ok) { var sd = await sr.json(); setThoughtsHeading((sd.value&&sd.value.thoughtsHeading)||null); }
+        else { setThoughtsHeading(null); }
+      } catch(e) { setThoughtsHeading(null); }
+      if (!records.length) { setThoughtsPosts([]); setThoughtsLoading(false); return; }
+      var uris = records.map(function(rec){return rec.value&&rec.value.postUri;}).filter(Boolean);
+      var qstr = uris.map(function(u){return 'uris='+encodeURIComponent(u);}).join('&');
+      var pr = await api(PUB_PROXY+'/app.bsky.feed.getPosts?'+qstr);
+      if (pr.ok) {
+        var pd = await pr.json();
+        var postMap = {};
+        (pd.posts||[]).forEach(function(p){postMap[p.uri]=p;});
+        var ordered = records
+          .filter(function(rec){return rec.value&&postMap[rec.value.postUri];})
+          .sort(function(a,b){return new Date(b.value.createdAt)-new Date(a.value.createdAt);})
+          .map(function(rec){return {post:postMap[rec.value.postUri],recordUri:rec.uri};});
+        setThoughtsPosts(ordered);
+      }
+    } catch(e) {}
+    setThoughtsLoading(false);
+  }
+
+  async function submitThought() {
+    if (!sess || !thoughtsInput.trim() || thoughtsInput.length > 300 || thoughtsSubmitting) return;
+    setThoughtsSubmitting(true); setThoughtsErr('');
+    try {
+      var text = thoughtsInput.trim();
+      var now = new Date().toISOString();
+      var postRecord = {'$type':'app.bsky.feed.post', text:text, createdAt:now};
+      var facets = buildUrlFacets(text);
+      if (facets.length) postRecord.facets = facets;
+      var postRes = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body:JSON.stringify({repo:sess.did, collection:'app.bsky.feed.post', record:postRecord})
+      });
+      if (!postRes.ok) throw new Error(await postRes.text());
+      var postData = await postRes.json();
+      var idxRes = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body:JSON.stringify({repo:sess.did, collection:'raccnet.channel.post', record:{
+          '$type':'raccnet.channel.post', postUri:postData.uri, postCid:postData.cid||'', createdAt:now
+        }})
+      });
+      if (!idxRes.ok) throw new Error(await idxRes.text());
+      var idxData = await idxRes.json();
+      setThoughtsInput('');
+      setThoughtsEnabled(true);
+      // Prepend directly to state — avoids relying on indexer catching up
+      var newEntry = {
+        post: {uri:postData.uri, cid:postData.cid||'', record:postRecord,
+          author:{did:sess.did,handle:sess.handle,displayName:sess.displayName,avatar:sess.avatar}},
+        recordUri: idxData.uri
+      };
+      setThoughtsPosts(function(prev){return [newEntry].concat(prev);});
+    } catch(e) { setThoughtsErr(e.message||'Failed to post'); }
+    setThoughtsSubmitting(false);
+  }
+
+  async function removeThought(recordUri, postUri) {
+    if (!sess) return;
+    try {
+      await api(AUTH_PROXY+'/com.atproto.repo.deleteRecord', {
+        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body:JSON.stringify({repo:sess.did, collection:'raccnet.channel.post', rkey:recordUri.split('/').pop()})
+      });
+      if (postUri) {
+        await api(AUTH_PROXY+'/com.atproto.repo.deleteRecord', {
+          method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+          body:JSON.stringify({repo:sess.did, collection:'app.bsky.feed.post', rkey:postUri.split('/').pop()})
+        });
+      }
+      setThoughtsPosts(function(prev){
+        var next = prev.filter(function(t){return t.recordUri!==recordUri;});
+        if (!next.length) setThoughtsEnabled(false);
+        return next;
+      });
+    } catch(e) {}
   }
 
   async function loadLikes(did) {
@@ -7904,9 +8110,11 @@ function ChannelPage(props) {
     ${showEdit&&isOwn?html`<${EditProfileModal}
       session=${sess}
       data=${d}
+      thoughtsHeading=${thoughtsHeading||''}
       onClose=${function(){setShowEdit(false);}}
       onSaved=${function(updated){
         setProfileData(Object.assign({},d,updated));
+        if(updated.thoughtsHeading!==undefined) setThoughtsHeading(updated.thoughtsHeading||null);
         setShowEdit(false);
       }}
     />`:null}
@@ -7940,10 +8148,10 @@ function ChannelPage(props) {
       ${d.banner?html`<img src=${d.banner} alt="" style=${{width:'100%',maxHeight:320,objectFit:'cover',display:'block'}}/>`:html`<div style=${{height:240}}/>`}
     </div>
     <div style=${{padding:portrait?'0 12px':'0 24px',borderBottom:'1px solid var(--accent)'}}>
-      <div style=${{display:'flex',alignItems:portrait?'flex-start':'center',gap:portrait?10:20,padding:'20px 0 20px'}}>
-        <div style=${{display:'flex',flexDirection:'column',alignItems:'center',gap:portrait?6:0,flexShrink:0}}>
-          <${Avatar} src=${d.avatar} size=${portrait?64:80}/>
-          ${portrait?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'stretch',gap:4,width:64}}>
+      <div style=${{display:'flex',alignItems:'stretch',gap:portrait?10:16,padding:'12px 0 12px'}}>
+        <div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:portrait?6:8,flexShrink:0}}>
+          <${Avatar} src=${d.avatar} size=${portrait?80:192}/>
+          ${portrait?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'stretch',gap:4,width:80}}>
             ${isOwn
               ? html`<button onClick=${function(){setShowEdit(true);}}
                   style=${{background:'#1a1a1a',border:'1px solid var(--accent)',color:'var(--accent)',padding:'5px 6px',
@@ -8015,17 +8223,74 @@ function ChannelPage(props) {
             </div>`:null}
           </div>`:null}
         </div>
-        <div style=${{flex:1,minWidth:0}}>
-          <h1 style=${{color:'#f1f1f1',fontSize:portrait?18:24,fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',gap:10}}>
-            ${d.displayName||d.handle}
-            ${!isOwn&&sess&&d.viewer&&d.viewer.following&&d.viewer.followedBy?html`<span style=${{fontSize:13,fontWeight:600,color:'var(--accent)',border:'1px solid var(--accent)',padding:'2px 8px',letterSpacing:0.5}}>Friends</span>`:null}
-          </h1>
-          <div style=${{color:'#aaa',fontSize:portrait?12:14}}>@${d.handle} · ${fmt(d.followersCount||0)} subscribers · <span
-            style=${{color:'var(--accent)',cursor:'pointer'}}
-            onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>
-            ${fmt(d.followsCount||0)} subscriptions
-          </span> · ${channelVideos.length} videos</div>
-          ${d.description?html`<div style=${{color:'#aaa',fontSize:portrait?12:13,marginTop:6,lineHeight:1.6}}>${renderMarkdown(d.description.slice(0,400)+(d.description.length>400?'…':''), props.onChannel, triggerSearch)}</div>`:null}
+        <div style=${{flex:1,minWidth:0,display:!portrait?'flex':'block',gap:8,alignItems:'stretch'}}>
+          <div style=${{flex:'0 0 auto'}}>
+            <h1 style=${{color:'#f1f1f1',fontSize:portrait?18:24,fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',gap:10}}>
+              ${d.displayName||d.handle}
+              ${!isOwn&&sess&&d.viewer&&d.viewer.following&&d.viewer.followedBy?html`<span style=${{fontSize:13,fontWeight:600,color:'var(--accent)',border:'1px solid var(--accent)',padding:'2px 8px',letterSpacing:0.5}}>Friends</span>`:null}
+            </h1>
+            <div style=${{color:'#aaa',fontSize:portrait?12:14,whiteSpace:'nowrap'}}>@${d.handle} · ${fmt(d.followersCount||0)} subscribers · <span
+              style=${{color:'var(--accent)',cursor:'pointer'}}
+              onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>
+              ${fmt(d.followsCount||0)} subscriptions
+            </span> · ${channelVideos.length} videos</div>
+            ${d.description?html`<div style=${{color:'#aaa',fontSize:portrait?12:13,marginTop:6,lineHeight:1.6}}>${renderMarkdown(d.description.slice(0,400)+(d.description.length>400?'…':''), props.onChannel, triggerSearch)}</div>`:null}
+          </div>
+          ${!portrait?(function(){
+            var shouldShow = thoughtsHide !== 'all' &&
+              ((isOwn && sess && thoughtsHide !== 'own') || (!isOwn && thoughtsEnabled));
+            if (!shouldShow) return null;
+            var headingText = thoughtsHeading !== undefined && !thoughtsLoading ? (thoughtsHeading || ((d.displayName||d.handle)+"'s Thoughts")) : null;
+            return html`<div style=${{flex:'1 0 0',minWidth:0}}>
+              ${headingText?html`<div style=${{fontSize:13,fontWeight:600,color:'var(--accent)',marginBottom:6,letterSpacing:0.3}}>${headingText}</div>`:html`<div style=${{height:21,marginBottom:6}}/>`}
+              <div style=${{border:'1px solid var(--accent)',display:'flex',flexDirection:'column',height:180,overflow:'hidden'}}>
+                <div style=${{flex:1,minHeight:0,overflowY:'auto',overscrollBehavior:'contain',scrollbarWidth:'thin',scrollbarColor:'var(--accent) transparent'}}>
+                  ${thoughtsLoading?html`<div style=${{padding:'14px 12px',color:'#555',fontSize:13,textAlign:'center'}}>Loading…</div>`:null}
+                  ${!thoughtsLoading&&!thoughtsPosts.length&&isOwn?html`<div style=${{padding:'14px 12px',color:'#555',fontSize:12,textAlign:'center'}}>${thoughtsHeading?'No posts yet.':'No thoughts yet.'}</div>`:null}
+                  ${thoughtsPosts.map(function(t,i){
+                    var rec=t.post&&t.post.record;
+                    return html`<div key=${t.recordUri}
+                      style=${{padding:'8px 12px',borderBottom:'1px solid var(--accent)',
+                        display:'flex',alignItems:'flex-start',gap:8}}>
+                      <div style=${{flex:1,fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word',minWidth:0}}>
+                        ${renderMarkdown(rec&&rec.text||'',props.onChannel,triggerSearch)}
+                      </div>
+                      <div style=${{display:'flex',alignItems:'center',gap:4,flexShrink:0,paddingTop:2}}>
+                        <span style=${{fontSize:11,color:'#555',whiteSpace:'nowrap'}}>${ago(rec&&rec.createdAt||'')}</span>
+                        ${!isOwn&&sess?html`<${ThoughtActions} post=${t.post} session=${sess}/>`:null}
+                        ${isOwn?html`<button onClick=${function(){removeThought(t.recordUri,t.post&&t.post.uri);}}
+                          style=${{background:'none',border:'none',color:'var(--accent)',fontSize:11,cursor:'pointer',padding:'0 2px',lineHeight:1,opacity:0.7}}
+                          onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+                          onMouseLeave=${function(e){e.currentTarget.style.opacity='0.7';}}
+                          title="Remove from thoughts">✕</button>`:null}
+                      </div>
+                    </div>`;
+                  })}
+                </div>
+                ${isOwn&&sess?html`<div style=${{borderTop:'1px solid var(--accent)',padding:'6px 10px',flexShrink:0,display:'flex',alignItems:'center',gap:8}}>
+                  <textarea
+                    value=${thoughtsInput}
+                    onInput=${function(e){setThoughtsInput(e.target.value);}}
+                    onKeyDown=${function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitThought();}}}
+                    placeholder=${thoughtsHeading?'Upload a post...':'Share a thought…'}
+                    rows="1"
+                    style=${{flex:1,background:'transparent',border:'none',color:'#f1f1f1',
+                      padding:'2px 0',fontSize:13,resize:'none',fontFamily:'Roboto,sans-serif',
+                      outline:'none',boxSizing:'border-box',lineHeight:'1.5',minWidth:0}}/>
+                  <span style=${{fontSize:11,color:thoughtsInput.length>280?'#f87171':'#555',flexShrink:0,whiteSpace:'nowrap'}}>${thoughtsInput.length}/300</span>
+                  ${thoughtsErr?html`<span style=${{fontSize:11,color:'#f87171',flexShrink:0}}>${thoughtsErr}</span>`:null}
+                  <button onClick=${submitThought}
+                    disabled=${thoughtsSubmitting||!thoughtsInput.trim()||thoughtsInput.length>300}
+                    style=${{background:'none',border:'1px solid var(--accent)',color:'var(--accent)',
+                      padding:'3px 10px',fontSize:12,fontWeight:600,borderRadius:0,flexShrink:0,
+                      opacity:thoughtsInput.trim()&&thoughtsInput.length<=300&&!thoughtsSubmitting?1:0.35,
+                      cursor:thoughtsInput.trim()&&thoughtsInput.length<=300&&!thoughtsSubmitting?'pointer':'not-allowed'}}>
+                    ${thoughtsSubmitting?'Posting…':'Post'}
+                  </button>
+                </div>`:null}
+              </div>
+            </div>`;
+          })():null}
         </div>
         ${!portrait?html`<div style=${{display:'flex',alignItems:'center',gap:8}}>
           ${isOwn
@@ -8034,7 +8299,7 @@ function ChannelPage(props) {
                   fontWeight:600,fontSize:14,cursor:'pointer',borderRadius:0,transition:'background 0.15s'}}
                 onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';}}
                 onMouseLeave=${function(e){e.currentTarget.style.background='#1a1a1a';}}>
-                ✏ Edit Profile
+                ✏ Edit Channel
               </button>`
             : html`<${SubscribeButton} did=${d.did} viewer=${d.viewer} session=${props.session}/>`
           }
@@ -8099,6 +8364,60 @@ function ChannelPage(props) {
           </div>`:null}
         </div>`:null}
       </div>
+      ${portrait?(function(){
+        var shouldShow = thoughtsHide !== 'all' &&
+          ((isOwn && sess && thoughtsHide !== 'own') || (!isOwn && thoughtsEnabled));
+        if (!shouldShow || !d) return null;
+        var headingText = thoughtsHeading !== undefined && !thoughtsLoading ? (thoughtsHeading || ((d.displayName||d.handle)+"'s Thoughts")) : null;
+        return html`<div style=${{padding:'0 12px 12px 12px'}}>
+          ${headingText?html`<div style=${{fontSize:13,fontWeight:600,color:'var(--accent)',marginBottom:6,letterSpacing:0.3}}>${headingText}</div>`:html`<div style=${{height:21,marginBottom:6}}/>`}
+          <div style=${{border:'1px solid var(--accent)',height:180,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+            <div style=${{flex:1,minHeight:0,overflowY:'auto',overscrollBehavior:'contain',scrollbarWidth:'thin',scrollbarColor:'var(--accent) transparent'}}>
+              ${thoughtsLoading?html`<div style=${{padding:'14px 12px',color:'#555',fontSize:13,textAlign:'center'}}>Loading…</div>`:null}
+              ${!thoughtsLoading&&!thoughtsPosts.length&&isOwn?html`<div style=${{padding:'14px 12px',color:'#555',fontSize:12,textAlign:'center'}}>${thoughtsHeading?'No posts yet.':'No thoughts yet.'}</div>`:null}
+              ${thoughtsPosts.map(function(t,i){
+                var rec=t.post&&t.post.record;
+                return html`<div key=${t.recordUri}
+                  style=${{padding:'8px 12px',borderBottom:'1px solid var(--accent)',display:'flex',alignItems:'flex-start',gap:8}}>
+                  <div style=${{flex:1,fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word',minWidth:0}}>
+                    ${renderMarkdown(rec&&rec.text||'',props.onChannel,triggerSearch)}
+                  </div>
+                  <div style=${{display:'flex',alignItems:'center',gap:4,flexShrink:0,paddingTop:2}}>
+                    <span style=${{fontSize:11,color:'#555',whiteSpace:'nowrap'}}>${ago(rec&&rec.createdAt||'')}</span>
+                    ${!isOwn&&sess?html`<${ThoughtActions} post=${t.post} session=${sess}/>`:null}
+                    ${isOwn?html`<button onClick=${function(){removeThought(t.recordUri,t.post&&t.post.uri);}}
+                      style=${{background:'none',border:'none',color:'var(--accent)',fontSize:11,cursor:'pointer',padding:'0 2px',lineHeight:1,opacity:0.7}}
+                      onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+                      onMouseLeave=${function(e){e.currentTarget.style.opacity='0.7';}}
+                      title="Remove from thoughts">✕</button>`:null}
+                  </div>
+                </div>`;
+              })}
+            </div>
+            ${isOwn&&sess?html`<div style=${{borderTop:'1px solid var(--accent)',padding:'6px 10px',flexShrink:0,display:'flex',alignItems:'center',gap:8}}>
+              <textarea
+                value=${thoughtsInput}
+                onInput=${function(e){setThoughtsInput(e.target.value);}}
+                onKeyDown=${function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitThought();}}}
+                placeholder=${thoughtsHeading?'Upload a post...':'Share a thought…'}
+                rows="1"
+                style=${{flex:1,background:'transparent',border:'none',color:'#f1f1f1',
+                  padding:'2px 0',fontSize:13,resize:'none',fontFamily:'Roboto,sans-serif',
+                  outline:'none',boxSizing:'border-box',lineHeight:'1.5',minWidth:0}}/>
+              <span style=${{fontSize:11,color:thoughtsInput.length>280?'#f87171':'#555',flexShrink:0,whiteSpace:'nowrap'}}>${thoughtsInput.length}/300</span>
+              ${thoughtsErr?html`<span style=${{fontSize:11,color:'#f87171',flexShrink:0}}>${thoughtsErr}</span>`:null}
+              <button onClick=${submitThought}
+                disabled=${thoughtsSubmitting||!thoughtsInput.trim()||thoughtsInput.length>300}
+                style=${{background:'none',border:'1px solid var(--accent)',color:'var(--accent)',
+                  padding:'3px 10px',fontSize:12,fontWeight:600,borderRadius:0,flexShrink:0,
+                  opacity:thoughtsInput.trim()&&thoughtsInput.length<=300&&!thoughtsSubmitting?1:0.35,
+                  cursor:thoughtsInput.trim()&&thoughtsInput.length<=300&&!thoughtsSubmitting?'pointer':'not-allowed'}}>
+                ${thoughtsSubmitting?'Posting…':'Post'}
+              </button>
+            </div>`:null}
+          </div>
+        </div>`;
+      })():null}
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <div style=${{display:'flex',overflowX:portrait?'auto':'visible',scrollbarWidth:'none',msOverflowStyle:'none',flex:1,minWidth:0}}>
           ${(function(){
