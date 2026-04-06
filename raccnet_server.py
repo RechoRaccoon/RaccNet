@@ -7751,7 +7751,8 @@ function ChannelPage(props) {
       if (!records.length) { setThoughtsPosts([]); setThoughtsLoading(false); return; }
       var uris = records.map(function(rec){return rec.value&&rec.value.postUri;}).filter(Boolean);
       var qstr = uris.map(function(u){return 'uris='+encodeURIComponent(u);}).join('&');
-      var pr = await api(PUB_PROXY+'/app.bsky.feed.getPosts?'+qstr);
+      var postsHdrs = sess ? {headers:{Authorization:'Bearer '+sess.accessJwt}} : {};
+      var pr = await api((sess?AUTH_PROXY:PUB_PROXY)+'/app.bsky.feed.getPosts?'+qstr, postsHdrs);
       if (pr.ok) {
         var pd = await pr.json();
         var postMap = {};
