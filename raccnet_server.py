@@ -105,6 +105,10 @@ button{-moz-appearance:none;cursor:pointer;font-family:'Roboto',sans-serif}
 input{-moz-appearance:none;font-family:'Roboto',sans-serif}
 video::-webkit-media-controls-timeline{accent-color:var(--accent)}
 input[type=range]{accent-color:var(--accent)}
+input[type="range"]::-webkit-slider-thumb{background:var(--accent)}
+input[type="range"]::-webkit-slider-runnable-track{background:#333}
+input[type="range"]::-moz-range-thumb{background:var(--accent);border:none}
+input[type="range"]::-moz-range-track{background:#333}
 a{color:inherit;text-decoration:none}
 button:focus,input:focus,video:focus{outline:none}
 #app{min-height:100vh}
@@ -124,6 +128,7 @@ button:focus,input:focus,video:focus{outline:none}
 'use strict';
 const { h, render, useState, useEffect, useRef, useCallback, createContext, useContext } = htmPreact;
 const html = htmPreact.html;
+var _globalRateLimited = { value: false, set: null };
 
 function usePortrait() {
   const [portrait, setPortrait] = useState(function(){ return window.innerHeight > window.innerWidth; });
@@ -265,8 +270,71 @@ function viewerFollows(profile) { return profile && profile.viewer && profile.vi
 async function api(url, opts) {
   opts = opts || {};
   const headers = Object.assign({'Accept':'application/json'}, opts.headers || {});
+  // log PDS activity
+  if (url.includes('putRecord') || url.includes('getRecord')) {
+    var _logAction = url.includes('putRecord') ? 'write' : 'read';
+    var _logColl = (url.match(/collection=([^&]+)/)||[])[1]||url.split('/').pop();
+    _devLog('PDS', _logAction, decodeURIComponent(_logColl||url));
+  }
   const res = await fetch(url, Object.assign({}, opts, {headers}));
+  if (res.status === 429) {
+    _globalRateLimited.value = true;
+    if (_globalRateLimited.set) _globalRateLimited.set(true);
+  }
   return res;
+}
+
+// ── Dev log buffer ─────────────────────────────────────────────────────────────
+var _devLogs = [];
+var _devLogListeners = [];
+function _devLog(system, action, detail) {
+  var entry = {system:system, action:action, detail:detail, t:new Date().toLocaleTimeString()};
+  _devLogs.push(entry);
+  if (_devLogs.length > 200) _devLogs.shift();
+  _devLogListeners.forEach(function(fn){fn(entry);});
+}
+
+// ── Channel settings cache (browser Cache API) ─────────────────────────────────
+var SETTINGS_CACHE_NAME = 'raccnet-channel-settings-v1';
+async function readSettingsCache(did) {
+  try {
+    var cache = await caches.open(SETTINGS_CACHE_NAME);
+    var resp = await cache.match('http://raccnet-local/settings/'+encodeURIComponent(did));
+    if (resp) { _devLog('CACHE','read','settings:'+did); return await resp.json(); }
+  } catch(e){ _devLog('CACHE','error','read settings:'+did+' '+String(e)); }
+  return null;
+}
+async function writeSettingsCache(did, value) {
+  try {
+    var cache = await caches.open(SETTINGS_CACHE_NAME);
+    await cache.put('http://raccnet-local/settings/'+encodeURIComponent(did),
+      new Response(JSON.stringify(value), {headers:{'Content-Type':'application/json'}}));
+    _devLog('CACHE','write','settings:'+did);
+  } catch(e){ _devLog('CACHE','error','write settings:'+did+' '+String(e)); }
+}
+
+var FEED_CACHE_NAME = 'raccnet-feed-cache-v1';
+async function readFeedCache(key) {
+  try {
+    var cache = await caches.open(FEED_CACHE_NAME);
+    var resp = await cache.match('http://raccnet-local/feed/'+encodeURIComponent(key));
+    if (resp) {
+      var data = await resp.json();
+      // Expire after 5 minutes
+      if (data._ts && (Date.now()-data._ts) < 5*60*1000) {
+        _devLog('CACHE','read','feed:'+key); return data.items;
+      }
+    }
+  } catch(e){}
+  return null;
+}
+async function writeFeedCache(key, items) {
+  try {
+    var cache = await caches.open(FEED_CACHE_NAME);
+    await cache.put('http://raccnet-local/feed/'+encodeURIComponent(key),
+      new Response(JSON.stringify({items:items, _ts:Date.now()}), {headers:{'Content-Type':'application/json'}}));
+    _devLog('CACHE','write','feed:'+key);
+  } catch(e){}
 }
 
 const isVid = function(p) {
@@ -301,6 +369,495 @@ function isVidRaw(p) {
     if (rm['$type'] === 'app.bsky.embed.video' || rm['$type'] === 'app.bsky.embed.video#view') return true;
   }
   return false;
+}
+
+// Detect image post — checks both hydrated and raw embed shapes
+function isImagePost(p) {
+  if (!p) return false;
+  var embed = p.embed || {};
+  if (embed.images && embed.images.length) return true;
+  if (embed.media && embed.media.images && embed.media.images.length) return true;
+  return false;
+}
+function getPostImages(p) {
+  if (!p) return [];
+  var embed = p.embed || {};
+  if (embed.images && embed.images.length) return embed.images;
+  if (embed.media && embed.media.images && embed.media.images.length) return embed.media.images;
+  return [];
+}
+// Global helper: gather all images from a thread node (same author only)
+function gatherThreadImgs(node, authorDid) {
+  if (!node || !node.post) return [];
+  var out = [];
+  if (!authorDid || node.post.author.did === authorDid) {
+    getPostImages(node.post).forEach(function(im){ out.push({src:im.fullsize||im.thumb, alt:im.alt||''}); });
+  }
+  (node.replies||[]).forEach(function(child){ out = out.concat(gatherThreadImgs(child, authorDid)); });
+  return out;
+}
+// Gather all post objects from a thread by the same author (for thread-wide liking)
+function gatherThreadPostObjs(node, authorDid) {
+  if (!node || !node.post) return [];
+  var out = [];
+  if (!authorDid || node.post.author.did === authorDid) {
+    out.push(node.post);
+  }
+  (node.replies||[]).forEach(function(child){ out = out.concat(gatherThreadPostObjs(child, authorDid)); });
+  return out;
+}
+// Gather all non-carousel comments from thread tree (skips same-author image posts but collects their replies)
+function gatherThreadComments(node, authorDid) {
+  if (!node || !node.post) return [];
+  var out = [];
+  (node.replies||[]).forEach(function(r){
+    if (!r.post) return;
+    var isCarousel = isImagePost(r.post) && r.post.author && authorDid && r.post.author.did === authorDid;
+    if (isCarousel) {
+      gatherThreadComments(r, authorDid).forEach(function(c){ out.push(c); });
+    } else {
+      out.push(r);
+    }
+  });
+  return out;
+}
+
+// Cache: post URI → total thread image count (or null while loading)
+var _threadImgCountCache = {};
+
+// Single cell in the image grid — lazy-fetches thread to get accurate total count
+function PostImageCell(props) {
+  var p = props.post;
+  var sess = props.session || null;
+  var imgs = getPostImages(p);
+  var first = imgs[0];
+  var thumb = first && (first.thumb || first.fullsize || '');
+  var cached = _threadImgCountCache[p.uri];
+  var [totalCount, setTotalCount] = useState(cached != null ? cached : imgs.length);
+  var cellRef = useRef(null);
+  var menuRef = useRef(null);
+
+  // Thread count lazy-fetch
+  useEffect(function(){
+    if (cached != null) { setTotalCount(cached); return; }
+    var el = cellRef.current; if (!el) return;
+    var active = true;
+    var obs = new IntersectionObserver(function(entries){
+      if (!entries[0].isIntersecting) return;
+      obs.disconnect();
+      if (_threadImgCountCache[p.uri] != null) { setTotalCount(_threadImgCountCache[p.uri]); return; }
+      api(PUB_PROXY+'/app.bsky.feed.getPostThread?uri='+encodeURIComponent(p.uri)+'&depth=100')
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(d){
+          if (!d || !active) return;
+          var count = gatherThreadImgs(d.thread, p.author && p.author.did).length;
+          _threadImgCountCache[p.uri] = count;
+          setTotalCount(count);
+        }).catch(function(){});
+    }, {rootMargin:'600px'});
+    obs.observe(el);
+    return function(){ active=false; obs.disconnect(); };
+  }, [p.uri]);
+
+  // Liked / reposted
+  const likedUris = useContext(LikedUrisCtx);
+  const isLiked = likedUris.has(p.uri) || (p.viewer && !!p.viewer.like);
+  const isReposted = p.viewer && !!p.viewer.repost;
+  const blockedDids = useContext(BlockedDidsCtx);
+  const [blocked,      setBlocked]      = useState(function(){ return blockedDids.has(p.author && p.author.did); });
+  const [blockLoading, setBlockLoading] = useState(false);
+
+  // Like state
+  const [liked,   setLiked]   = useState(isLiked);
+  const [likeUri, setLikeUri] = useState((p.viewer && p.viewer.like) || null);
+  useEffect(function(){ setLiked(likedUris.has(p.uri) || (p.viewer && !!p.viewer.like)); }, [p.uri, likedUris.size]);
+
+  // Hover / menu state
+  const [cellHov,        setCellHov]        = useState(false);
+  const [menuOpen,       setMenuOpen]       = useState(false);
+  const [menuView,       setMenuView]       = useState('main');
+  const [menuHov,        setMenuHov]        = useState(false);
+  const [optHov,         setOptHov]         = useState('');
+  const [userPlaylists,  setUserPlaylists]  = useState(null);
+  const [playlistLoading,setPlaylistLoading]= useState(false);
+  const [playlistMsg,    setPlaylistMsg]    = useState('');
+  const [newPlName,      setNewPlName]      = useState('');
+  const [newPlDesc,      setNewPlDesc]      = useState('');
+  const [newPlImg,       setNewPlImg]       = useState(null);
+  const [newPlImgBlob,   setNewPlImgBlob]   = useState(null);
+  const [creating,       setCreating]       = useState(false);
+  const [plItemHov,      setPlItemHov]      = useState(-1);
+  const [showShare,      setShowShare]      = useState(false);
+
+  // Close menu on outside click
+  useEffect(function(){
+    if (!menuOpen) return;
+    function handler(e) {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false); setMenuView('main');
+      }
+    }
+    document.addEventListener('mousedown', handler);
+    return function(){ document.removeEventListener('mousedown', handler); };
+  }, [menuOpen]);
+
+  async function toggleLike() {
+    if (!sess) return;
+    if (liked) {
+      setLiked(false);
+      _likedUriSet.delete(p.uri);
+      if(_likedCtxRef.set) _likedCtxRef.set(function(prev){var n=new Set(prev);n.delete(p.uri);return n;});
+      const rkey = likeUri && likeUri.split('/').pop(); setLikeUri(null);
+      if (rkey) await bskyDelete(sess,'app.bsky.feed.like',rkey);
+    } else {
+      setLiked(true);
+      _likedUriSet.add(p.uri);
+      if(_likedCtxRef.set) _likedCtxRef.set(function(prev){var n=new Set(prev);n.add(p.uri);return n;});
+      const uri = await bskyCreate(sess,'app.bsky.feed.like',{'$type':'app.bsky.feed.like',subject:{uri:p.uri,cid:p.cid},createdAt:new Date().toISOString()});
+      setLikeUri(uri);
+    }
+  }
+
+  async function openPlaylists(mode) {
+    setMenuView(mode||'playlists');
+    if (!sess) { setUserPlaylists([]); return; }
+    setPlaylistLoading(true);
+    try {
+      var r = await api(AUTH_PROXY+'/app.bsky.graph.getLists?actor='+encodeURIComponent(sess.did)+'&limit=100',
+        {headers:{Authorization:'Bearer '+sess.accessJwt}});
+      if (r.ok) {
+        var d = await r.json();
+        setUserPlaylists((d.lists||[]).filter(function(l){return (l.description||'').startsWith('RaccNet Playlist');}));
+      } else { setUserPlaylists([]); }
+    } catch(e) { setUserPlaylists([]); }
+    setPlaylistLoading(false);
+  }
+
+  async function addToPlaylist(listUri) {
+    setPlaylistMsg('Adding…');
+    try {
+      if (!sess) { setPlaylistMsg('Not signed in.'); return; }
+      var res = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body: JSON.stringify({
+          repo: sess.did,
+          collection: 'raccnet.playlist.item',
+          record: {'$type':'raccnet.playlist.item',postUri:p.uri,postCid:p.cid||'',listUri:listUri,createdAt:new Date().toISOString()}
+        })
+      });
+      if (res.ok) {
+        var rd = await res.json();
+        if (rd && rd.uri) setPlaylistAtUri(listUri, p.uri, rd.uri);
+        setPlaylistMsg('Added!');
+        setTimeout(function(){setMenuOpen(false);setMenuView('main');setPlaylistMsg('');}, 900);
+      } else { setPlaylistMsg('Error adding.'); }
+    } catch(e) { setPlaylistMsg('Error adding.'); }
+  }
+
+  async function createPlaylist() {
+    if (!sess || !newPlName.trim()) return;
+    setCreating(true);
+    try {
+      var avatarRef = null;
+      if (newPlImgBlob) {
+        var upR = await api(AUTH_PROXY+'/com.atproto.repo.uploadBlob', {
+          method:'POST',
+          headers:{'Content-Type':newPlImgBlob.type||'image/jpeg','Authorization':'Bearer '+sess.accessJwt},
+          body: newPlImgBlob
+        });
+        if (upR.ok) { var upD = await upR.json(); avatarRef = upD.blob; }
+      }
+      var record = {'$type':'app.bsky.graph.list',purpose:'app.bsky.graph.defs#curatelist',
+        name:newPlName.trim(),description:'RaccNet Playlist'+(newPlDesc.trim()?'\n'+newPlDesc.trim():''),
+        createdAt:new Date().toISOString()};
+      if (avatarRef) record.avatar = avatarRef;
+      var r = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body: JSON.stringify({repo:sess.did,collection:'app.bsky.graph.list',record})
+      });
+      if (r.ok) {
+        setPlaylistMsg('Created!');
+        setNewPlName(''); setNewPlDesc(''); setNewPlImg(null); setNewPlImgBlob(null);
+        await addToPlaylist((await r.json()).uri);
+        setCreating(false);
+      } else { setPlaylistMsg('Error creating.'); setCreating(false); }
+    } catch(e) { setPlaylistMsg('Error creating.'); setCreating(false); }
+  }
+
+  async function blockChannel() {
+    if (!sess || !p.author || !p.author.did) return;
+    setBlockLoading(true);
+    try {
+      const res = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body: JSON.stringify({repo:sess.did,collection:'app.bsky.graph.block',
+          record:{'$type':'app.bsky.graph.block',subject:p.author.did,createdAt:new Date().toISOString()}})
+      });
+      if (res.ok) {
+        setBlocked(true);
+        _blockedDidsSet.add(p.author.did);
+        if(_blockedCtxRef.set) _blockedCtxRef.set(function(prev){var n=new Set(prev);n.add(p.author.did);return n;});
+      }
+    } catch(e) {}
+    setBlockLoading(false);
+    setMenuOpen(false);
+  }
+
+  async function unblockChannel() {
+    if (!sess || !p.author || !p.author.did) return;
+    setBlockLoading(true);
+    try {
+      var r = await api(AUTH_PROXY+'/app.bsky.graph.getBlocks?limit=100',
+        {headers:{Authorization:'Bearer '+sess.accessJwt}});
+      if (r.ok) {
+        var bd = await r.json();
+        var blk = (bd.blocks||[]).find(function(b){return b.did===p.author.did;});
+        if (blk && blk.viewer && blk.viewer.blocking) {
+          var rkey = blk.viewer.blocking.split('/').pop();
+          await api(AUTH_PROXY+'/com.atproto.repo.deleteRecord', {
+            method:'POST',
+            headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+            body: JSON.stringify({repo:sess.did,collection:'app.bsky.graph.block',rkey:rkey})
+          });
+          setBlocked(false);
+          _blockedDidsSet.delete(p.author.did);
+          if(_blockedCtxRef.set) _blockedCtxRef.set(function(prev){var n=new Set(prev);n.delete(p.author.did);return n;});
+        }
+      }
+    } catch(e) {}
+    setBlockLoading(false);
+    setMenuOpen(false);
+  }
+
+  function menuOptStyle(key) {
+    return {display:'block',width:'100%',padding:'9px 14px',background:optHov===key?'var(--accent-dim)':'none',
+      border:'none',borderLeft:optHov===key?'2px solid var(--accent)':'2px solid transparent',
+      color:optHov===key?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',
+      textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s'};
+  }
+
+  var likeBtnSt = {background:liked?'var(--accent-solid-dim)':'rgba(0,0,0,0.7)',
+    border:'1px solid '+(liked?'var(--accent)':'rgba(255,255,255,0.3)'),
+    color:liked?'var(--accent)':'#fff',padding:'4px 6px',cursor:'pointer',borderRadius:0,
+    display:'flex',alignItems:'center',justifyContent:'center',transition:'background 0.12s'};
+  var dotsBtnSt = {background:menuHov?'var(--accent-dim)':'rgba(0,0,0,0.7)',
+    border:'1px solid var(--accent)',color:'var(--accent)',padding:'4px 6px',cursor:'pointer',borderRadius:0,
+    display:'flex',alignItems:'center',justifyContent:'center',transition:'background 0.12s'};
+
+  return html`<div ref=${cellRef} style=${{aspectRatio:'1',background:'#111',cursor:'pointer',position:'relative'}}
+    onMouseEnter=${function(){setCellHov(true);}}
+    onMouseLeave=${function(){setCellHov(false);}}>
+    ${showShare?html`<${ShareModal} post=${p} session=${sess} onClose=${function(){setShowShare(false);}}/>`  :null}
+    <div style=${{position:'absolute',inset:0,overflow:'hidden'}}
+      onClick=${function(){ if(!menuOpen&&window.raccnetOpenImage) window.raccnetOpenImage(p); }}>
+      ${thumb?html`<img src=${thumb} style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`:
+        html`<div style=${{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'#333'}}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+        </div>`}
+    </div>
+    ${totalCount>1?html`<div style=${{position:'absolute',top:4,right:4,background:'rgba(0,0,0,0.75)',color:'#fff',fontSize:10,padding:'2px 6px',fontWeight:700,pointerEvents:'none',letterSpacing:0.3,zIndex:2}}>${totalCount}</div>`:null}
+    ${(isLiked||isReposted)?html`<div style=${{position:'absolute',top:4,left:4,display:'flex',flexDirection:'column',gap:2,pointerEvents:'none',zIndex:2}}>
+      ${isLiked?html`<div style=${{background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',color:'var(--accent)',fontSize:10,fontWeight:700,padding:'1px 5px',display:'flex',alignItems:'center',gap:3,letterSpacing:0.3}}>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+        Liked
+      </div>`:null}
+      ${isReposted?html`<div style=${{background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',color:'var(--accent)',fontSize:10,fontWeight:700,padding:'1px 5px',display:'flex',alignItems:'center',gap:3,letterSpacing:0.3}}>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+        Reposted
+      </div>`:null}
+    </div>`:null}
+    ${cellHov?html`<div style=${{position:'absolute',bottom:4,left:4,right:4,display:'flex',justifyContent:'space-between',alignItems:'flex-end',zIndex:3}}>
+      <button style=${likeBtnSt}
+        onClick=${function(e){e.stopPropagation();toggleLike();}}
+        onMouseEnter=${function(e){if(!liked){e.currentTarget.style.background='rgba(255,255,255,0.15)';}}}
+        onMouseLeave=${function(e){e.currentTarget.style.background=liked?'var(--accent-solid-dim)':'rgba(0,0,0,0.7)';}}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>
+      </button>
+      <div ref=${menuRef} style=${{position:'relative'}}>
+        <button style=${dotsBtnSt}
+          onClick=${function(e){e.stopPropagation();setMenuOpen(function(o){return !o;});if(!menuOpen){setMenuView('main');setPlaylistMsg('');}}}
+          onMouseEnter=${function(){setMenuHov(true);}}
+          onMouseLeave=${function(){setMenuHov(false);}}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+        </button>
+        ${menuOpen?html`<div onClick=${function(e){e.stopPropagation();}}
+          style=${{position:'absolute',bottom:'calc(100% + 4px)',right:0,
+            background:'#1a1a1a',border:'1px solid var(--accent)',
+            minWidth:180,zIndex:500,boxShadow:'0 4px 20px rgba(0,0,0,0.7)'}}>
+          ${menuView==='main'?html`<div>
+            <button style=${menuOptStyle('share')}
+              onMouseEnter=${function(){setOptHov('share');}} onMouseLeave=${function(){setOptHov('');}}
+              onClick=${function(e){e.stopPropagation();setMenuOpen(false);setMenuView('main');setShowShare(true);}}>
+              Share
+            </button>
+            <button style=${menuOptStyle('playlist')}
+              onMouseEnter=${function(){setOptHov('playlist');}} onMouseLeave=${function(){setOptHov('');}}
+              onClick=${function(e){e.stopPropagation();openPlaylists('playlists');}}>
+              Add to Playlist
+            </button>
+            ${sess?html`<button style=${menuOptStyle('seticon')}
+              onMouseEnter=${function(){setOptHov('seticon');}} onMouseLeave=${function(){setOptHov('');}}
+              onClick=${function(e){e.stopPropagation();setCustomChannelMedia(sess,'icon',first&&(first.fullsize||first.thumb)||'');setMenuOpen(false);}}>
+              Set as Channel Icon
+            </button>`:null}
+            ${sess?html`<button style=${menuOptStyle('setbanner')}
+              onMouseEnter=${function(){setOptHov('setbanner');}} onMouseLeave=${function(){setOptHov('');}}
+              onClick=${function(e){e.stopPropagation();setCustomChannelMedia(sess,'banner',first&&(first.fullsize||first.thumb)||'');setMenuOpen(false);}}>
+              Set as Channel Banner
+            </button>`:null}
+            ${sess&&!blocked?html`<button style=${menuOptStyle('block')}
+              onMouseEnter=${function(){setOptHov('block');}} onMouseLeave=${function(){setOptHov('');}}
+              onClick=${function(e){e.stopPropagation();blockChannel();}}>
+              ${blockLoading?'Blocking…':'Block Channel'}
+            </button>`:null}
+            ${sess&&blocked?html`<button style=${menuOptStyle('unblock')}
+              onMouseEnter=${function(){setOptHov('unblock');}} onMouseLeave=${function(){setOptHov('');}}
+              onClick=${function(e){e.stopPropagation();unblockChannel();}}>
+              ${blockLoading?'Unblocking…':'Unblock Channel'}
+            </button>`:null}
+          </div>`:null}
+          ${menuView==='playlists'?html`<div>
+            <div style=${{padding:'8px 14px',borderBottom:'1px solid #2a2a2a',display:'flex',alignItems:'center',gap:8}}>
+              <button onClick=${function(e){e.stopPropagation();setMenuView('main');setPlaylistMsg('');}}
+                style=${{background:'none',border:'none',color:'#aaa',cursor:'pointer',padding:'2px 4px',fontSize:12,display:'flex',alignItems:'center',gap:4}}
+                onMouseEnter=${function(e){e.currentTarget.style.color='var(--accent)';}}
+                onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';}}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                Back
+              </button>
+              <span style=${{fontSize:12,color:'#aaa',fontWeight:600}}>Add to Playlist</span>
+            </div>
+            ${playlistMsg?html`<div style=${{padding:'6px 14px',fontSize:12,color:'var(--accent)'}}>${playlistMsg}</div>`:null}
+            ${playlistLoading?html`<div style=${{padding:'10px 14px',fontSize:12,color:'#aaa'}}>Loading…</div>`:null}
+            ${!playlistLoading&&userPlaylists&&userPlaylists.length===0?html`<div style=${{padding:'8px 14px',fontSize:12,color:'#666'}}>No playlists yet.</div>`:null}
+            ${!playlistLoading&&userPlaylists?userPlaylists.map(function(pl,pi){return html`<button key=${pl.uri}
+              style=${{display:'block',width:'100%',padding:'8px 14px',background:plItemHov===pi?'var(--accent-dim)':'none',
+                border:'none',borderLeft:plItemHov===pi?'2px solid var(--accent)':'2px solid transparent',
+                color:plItemHov===pi?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',
+                textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s',
+                overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
+              onMouseEnter=${function(){setPlItemHov(pi);}}
+              onMouseLeave=${function(){setPlItemHov(-1);}}
+              onClick=${function(e){e.stopPropagation();addToPlaylist(pl.uri);}}>
+              <span style=${{display:'flex',alignItems:'center',gap:6}}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style=${{flexShrink:0}}>
+                  <path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 9H9V9h10v2zm-4 4H9v-2h6v2zm4-8H9V5h10v2z"/>
+                </svg>
+                ${pl.name||'Unnamed Playlist'}
+              </span>
+            </button>`;}):[]}
+            <button style=${{display:'block',width:'100%',padding:'9px 14px',
+              background:optHov==='newpl'?'var(--accent-dim)':'none',
+              border:'none',borderTop:'1px solid #2a2a2a',
+              borderLeft:optHov==='newpl'?'2px solid var(--accent)':'2px solid transparent',
+              color:optHov==='newpl'?'var(--accent)':'#aaa',fontSize:13,cursor:'pointer',
+              textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s'}}
+              onMouseEnter=${function(){setOptHov('newpl');}}
+              onMouseLeave=${function(){setOptHov('');}}
+              onClick=${function(e){e.stopPropagation();setMenuView('create');setPlaylistMsg('');}}>
+              + Create New Playlist
+            </button>
+          </div>`:null}
+          ${menuView==='create'?html`<div onClick=${function(e){e.stopPropagation();}}>
+            <div style=${{padding:'8px 14px',borderBottom:'1px solid #2a2a2a',display:'flex',alignItems:'center',gap:8}}>
+              <button onClick=${function(e){e.stopPropagation();setMenuView('playlists');setPlaylistMsg('');}}
+                style=${{background:'none',border:'none',color:'#aaa',cursor:'pointer',padding:'2px 4px',fontSize:12,display:'flex',alignItems:'center',gap:4}}
+                onMouseEnter=${function(e){e.currentTarget.style.color='var(--accent)';}}
+                onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';}}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                Back
+              </button>
+              <span style=${{fontSize:12,color:'#aaa',fontWeight:600}}>New Playlist</span>
+            </div>
+            <div style=${{padding:'10px 14px',display:'flex',flexDirection:'column',gap:8}}>
+              <label style=${{display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
+                <div style=${{width:56,height:56,background:'#2a2a2a',border:'1px dashed '+(newPlImg?'var(--accent)':'#555'),
+                  display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',overflow:'hidden',flexShrink:0}}
+                  onClick=${function(){document.getElementById('plImgInput_ic_'+p.uri.replace(/[^a-z0-9]/gi,'_')).click();}}>
+                  ${newPlImg?html`<img src=${newPlImg} style=${{width:'100%',height:'100%',objectFit:'cover'}}/>`:
+                    html`<svg width="24" height="24" viewBox="0 0 24 24" fill="#555"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>`}
+                </div>
+                <input id=${'plImgInput_ic_'+p.uri.replace(/[^a-z0-9]/gi,'_')} type="file" accept="image/*" style=${{display:'none'}}
+                  onChange=${function(e){
+                    var f=e.target.files&&e.target.files[0];
+                    if(!f) return;
+                    setNewPlImgBlob(f);
+                    var r=new FileReader(); r.onload=function(ev){setNewPlImg(ev.target.result);}; r.readAsDataURL(f);
+                  }}/>
+              </label>
+              <input placeholder="Playlist name" value=${newPlName}
+                onInput=${function(e){setNewPlName(e.target.value);}}
+                onClick=${function(e){e.stopPropagation();}}
+                style=${{background:'#0f0f0f',border:'1px solid #3f3f3f',color:'#f1f1f1',
+                  padding:'6px 8px',fontSize:12,width:'100%',outline:'none',borderRadius:0}}/>
+              <textarea placeholder="Description (optional)" value=${newPlDesc}
+                onInput=${function(e){setNewPlDesc(e.target.value);}}
+                onClick=${function(e){e.stopPropagation();}}
+                style=${{background:'#0f0f0f',border:'1px solid #3f3f3f',color:'#f1f1f1',
+                  padding:'6px 8px',fontSize:12,width:'100%',resize:'vertical',minHeight:50,outline:'none',borderRadius:0,fontFamily:'Roboto,sans-serif'}}/>
+              ${playlistMsg?html`<div style=${{fontSize:11,color:'var(--accent)'}}>${playlistMsg}</div>`:null}
+              <button disabled=${creating||!newPlName.trim()}
+                onClick=${function(e){e.stopPropagation();createPlaylist();}}
+                style=${{background:newPlName.trim()?'var(--accent-solid-dim)':'#1a1a1a',
+                  border:'1px solid '+(newPlName.trim()?'var(--accent)':'#3f3f3f'),
+                  color:newPlName.trim()?'var(--accent)':'#555',
+                  padding:'7px',fontSize:12,cursor:newPlName.trim()?'pointer':'not-allowed',
+                  fontWeight:600,width:'100%',borderRadius:0,fontFamily:'Roboto,sans-serif'}}
+                onMouseEnter=${function(e){if(newPlName.trim())e.currentTarget.style.background='var(--accent-dim)';}}
+                onMouseLeave=${function(e){if(newPlName.trim())e.currentTarget.style.background='var(--accent-solid-dim)';}}>
+                ${creating?'Creating…':'Create Playlist'}
+              </button>
+            </div>
+          </div>`:null}
+        </div>`:null}
+      </div>
+    </div>`:null}
+  </div>`;
+}
+
+// Shared image grid for FeedPage / SubsPage / FriendsFeed
+// items: array of feed items ({post}) or plain post objects
+function PostImageGrid(props) {
+  const [visible, setVisible] = useState(45);
+  const sentinelRef = useRef(null);
+
+  // Infinite scroll sentinel
+  useEffect(function(){
+    var el = sentinelRef.current;
+    if (!el) return;
+    var obs = new IntersectionObserver(function(entries){
+      if (entries[0].isIntersecting) setVisible(function(v){ return v + 45; });
+    }, {rootMargin:'300px'});
+    obs.observe(el);
+    return function(){ obs.disconnect(); };
+  }, [sentinelRef.current]);
+
+  var cols = props.cols || 6;
+  var allItems = (props.items||[]).filter(function(x){ var p=x.post||x; return isImagePost(p); });
+  var visItems = allItems.slice(0, visible);
+  var hasMore  = visible < allItems.length;
+
+  return html`<div>
+    ${(props.loading&&!allItems.length)?html`<div style=${{display:'grid',gridTemplateColumns:'repeat('+cols+',1fr)',gap:3}}>
+      ${Array.from({length:cols*3}).map(function(_,i){
+        return html`<div key=${i} class="shimmer" style=${{aspectRatio:'1',background:'#272727'}}/>`;
+      })}
+    </div>`:null}
+    ${(!props.loading&&!allItems.length)?html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No image posts.</div>`:null}
+    ${allItems.length?html`<div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat('+cols+',1fr)',gap:3}}>
+        ${visItems.map(function(x,i){
+          var p=x.post||x;
+          return html`<${PostImageCell} key=${p.uri||i} post=${p}/>`;
+        })}
+      </div>
+      ${hasMore?html`<div ref=${sentinelRef} style=${{height:1}}/>`:null}
+      ${props.loading?html`<${RaccNetLoadingIndicator} label="Loading images"/>`:null}
+    </div>`:null}
+  </div>`;
 }
 
 function ago(d) {
@@ -484,6 +1041,63 @@ function VideoPlayer(props) {
     style=${{width:'100%',background:'#000',display:'block',maxHeight:'75vh',minHeight:'300px'}}/>`;
 }
 
+// ── HLS video pool — keeps videos alive across navigations ───────────────────
+var _hlsPool = {}; // src → {video, hls}
+var _hlsHolder = null;
+function _getHlsHolder() {
+  if (!_hlsHolder) {
+    _hlsHolder = document.createElement('div');
+    _hlsHolder.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:2px;height:2px;overflow:hidden;opacity:0.001;pointer-events:none;';
+    document.body.appendChild(_hlsHolder);
+  }
+  return _hlsHolder;
+}
+function _hlsPoolResume() {
+  Object.keys(_hlsPool).forEach(function(k){ var v=_hlsPool[k].video; if(v&&v.paused) v.play().catch(function(){}); });
+}
+document.addEventListener('visibilitychange', function(){ if(!document.hidden) _hlsPoolResume(); });
+
+function HLSLooper(props) {
+  var containerRef = useRef(null);
+  useEffect(function(){
+    if (!props.src || !containerRef.current) return;
+    var src = props.src;
+    var entry = _hlsPool[src];
+    if (!entry) {
+      var vid = document.createElement('video');
+      vid.autoplay = true; vid.muted = true; vid.loop = true; vid.playsInline = true;
+      vid.setAttribute('playsinline',''); vid.setAttribute('muted','');
+      vid.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+      var hls = null;
+      function setup() {
+        if (window.Hls && window.Hls.isSupported()) {
+          hls = new window.Hls({enableWorker:false,lowLatencyMode:false,startLevel:-1});
+          hls.loadSource(src); hls.attachMedia(vid);
+          hls.on(window.Hls.Events.MANIFEST_PARSED, function(){ vid.play().catch(function(){}); });
+          entry.hls = hls;
+        } else if (vid.canPlayType('application/vnd.apple.mpegurl')) {
+          vid.src = src; vid.play().catch(function(){});
+        }
+      }
+      entry = {video:vid, hls:null};
+      _hlsPool[src] = entry;
+      if (window.Hls) { setup(); } else {
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js';
+        s.crossOrigin = 'anonymous'; s.onload = setup;
+        document.head.appendChild(s);
+      }
+    }
+    var video = entry.video;
+    containerRef.current.appendChild(video);
+    if (video.paused) video.play().catch(function(){});
+    return function(){
+      if (video.parentNode === containerRef.current) { _getHlsHolder().appendChild(video); setTimeout(function(){ if(video.paused) video.play().catch(function(){}); }, 50); }
+    };
+  }, [props.src]);
+  return html`<div ref=${containerRef} style=${Object.assign({},props.style,{overflow:'hidden'})}/>`;
+}
+
 function Avatar(props) {
   const size = props.size || 36;
   const [err, setErr] = useState(false);
@@ -502,7 +1116,9 @@ function Avatar(props) {
     onMouseEnter=${function(){if(clickable) setHov(true);}}
     onMouseLeave=${function(){setHov(false);}}>
     ${props.src && !err
-      ? html`<img src=${props.src} alt="" onError=${function(){setErr(true);}} style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`
+      ? (props.src.includes('.m3u8')
+        ? html`<${HLSLooper} src=${props.src} style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`
+        : html`<img src=${props.src} alt="" onError=${function(){setErr(true);}} style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`)
       : '?'}
   </div>`;
 }
@@ -578,6 +1194,7 @@ function VideoCard(props) {
 
   const likedUris = useContext(LikedUrisCtx);
   const isLiked = likedUris.has(post.uri) || (post.viewer && !!post.viewer.like);
+  const isReposted = post.viewer && !!post.viewer.repost;
   const blockedDids = useContext(BlockedDidsCtx);
   const [blocked,      setBlocked]      = useState(function(){ return blockedDids.has(author&&author.did); });
   const [blockLoading, setBlockLoading] = useState(false);
@@ -886,12 +1503,15 @@ function VideoCard(props) {
           background:'rgba(0,0,0,0.7)',color:'var(--accent)',fontSize:10,padding:'2px 6px',fontWeight:600,letterSpacing:1}}>
           PREVIEW
         </div>`:null}
-        ${isLiked?html`<div style=${{position:'absolute',top:7,right:7,
-          background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',
-          color:'var(--accent)',fontSize:11,fontWeight:700,padding:'2px 7px',
-          display:'flex',alignItems:'center',gap:4,letterSpacing:0.3,pointerEvents:'none'}}>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent)"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-          Liked
+        ${(isLiked||isReposted)?html`<div style=${{position:'absolute',top:7,right:7,display:'flex',flexDirection:'column',gap:3,pointerEvents:'none'}}>
+          ${(isLiked||(isReposted&&!isLiked))?html`<div style=${{background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',color:'var(--accent)',fontSize:11,fontWeight:700,padding:'2px 7px',display:'flex',alignItems:'center',gap:4,letterSpacing:0.3}}>
+            ${isLiked?html`<svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent)"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`:html`<svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent)"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>`}
+            ${isLiked?'Liked':'Reposted'}
+          </div>`:null}
+          ${isReposted&&isLiked?html`<div style=${{background:'var(--accent-solid-dim)',border:'1px solid var(--accent)',color:'var(--accent)',fontSize:11,fontWeight:700,padding:'2px 7px',display:'flex',alignItems:'center',gap:4,letterSpacing:0.3}}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent)"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+            Reposted
+          </div>`:null}
         </div>`:null}
       </div>`}
     </div>
@@ -980,6 +1600,18 @@ function VideoCard(props) {
                   onMouseLeave=${function(){setOptHov('');}}
                   onClick=${function(e){e.stopPropagation();unblockChannel();}}>
                   ${blockLoading?'Unblocking…':'Unblock Channel'}
+                </button>`:null}
+                ${props.session?html`<button style=${menuOptStyle('seticon')}
+                  onMouseEnter=${function(){setOptHov('seticon');}}
+                  onMouseLeave=${function(){setOptHov('');}}
+                  onClick=${function(e){e.stopPropagation();setCustomChannelMedia(props.session,'icon',embed&&(embed.playlist||embed.thumbnail)||'');setMenuOpen(false);}}>
+                  Set as Channel Icon
+                </button>`:null}
+                ${props.session?html`<button style=${menuOptStyle('setbanner')}
+                  onMouseEnter=${function(){setOptHov('setbanner');}}
+                  onMouseLeave=${function(){setOptHov('');}}
+                  onClick=${function(e){e.stopPropagation();setCustomChannelMedia(props.session,'banner',embed&&(embed.playlist||embed.thumbnail)||'');setMenuOpen(false);}}>
+                  Set as Channel Banner
                 </button>`:null}
               </div>`:null}
               ${menuView==='playlists'?html`<div>
@@ -1338,7 +1970,7 @@ function LoginModal(props) {
         <p style=${{color:'#aaa',fontSize:12,marginBottom:20}}>Create an App Password at Bluesky Settings → Privacy & Security → App Passwords</p>
         ${err ? html`<div style=${{color:'#ff6666',fontSize:13,marginBottom:12}}>${err}</div>` : null}
         <button type="submit" disabled=${loading||!handle||!pw}
-          style=${{width:'100%',padding:12,background:'#ff0000',color:'#fff',border:'none',borderRadius:0,fontSize:15,fontWeight:600,opacity:(loading||!handle||!pw)?0.6:1}}>
+          style=${{width:'100%',padding:12,background:'var(--accent)',color:'#000',border:'none',borderRadius:0,fontSize:15,fontWeight:600,opacity:(loading||!handle||!pw)?0.6:1}}>
           ${loading ? 'Signing in...' : 'Sign In'}
         </button>
       </form>
@@ -1415,6 +2047,7 @@ function applySortFilter(items, sortOrder, timeRange) {
 
 function SortButton(props) {
   const [open, setOpen] = useState(false);
+  const [_gst, _setGst] = useState(0); // local tick so grid-size label re-renders on drag
   const ref = useRef(null);
   const sortOrder = props.sortOrder || 'Newest';
   const timeRange = props.timeRange || 'All Time';
@@ -1513,6 +2146,24 @@ function SortButton(props) {
         onClick=${function(){props.onToggleHideHistory&&props.onToggleHideHistory(!props.hideHistory);}}>
         ${props.hideHistory?'✓ ':''} Hide Watched
       </button>
+      ${props.gridMode?html`
+        <div style=${{height:1,background:'var(--accent)',margin:'4px 0',opacity:0.4}}></div>
+        <div style=${{padding:'6px 16px 4px',fontSize:11,color:'#666',fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>Grid Size</div>
+        <div style=${{padding:'6px 16px 12px'}} onClick=${function(e){e.stopPropagation();}}>
+          <div style=${{color:'var(--accent)',fontSize:12,marginBottom:6,fontWeight:700}}>${loadGridSize(props.gridMode,props.gridOrient||'landscape')} cols</div>
+          <input type="range" min="1" max="10" step="1"
+            value=${loadGridSize(props.gridMode,props.gridOrient||'landscape')}
+            onInput=${function(e){
+              saveGridSize(props.gridMode,props.gridOrient||'landscape',parseInt(e.target.value));
+              _setGst(function(t){return t+1;});
+              props.onGridTick&&props.onGridTick();
+            }}
+            style=${{width:'100%',accentColor:'var(--accent)',cursor:'pointer',height:4}}/>
+          <div style=${{display:'flex',justifyContent:'space-between',color:'var(--accent)',fontSize:10,marginTop:4,fontWeight:600}}>
+            ${[1,2,3,4,5,6,7,8,9,10].map(function(n){return html`<span key=${n}>${n}</span>`;})}
+          </div>
+        </div>
+      `:null}
     </div>`:null}
   </div>`;
 }
@@ -1787,8 +2438,11 @@ function VideoGrid(props) {
 
   useScrollLoad((hasMore || (props.hasMoreFromAPI && !props.loading)), handleLoadMore);
 
+  var _gc = props.gridCols;
+  var _gridTpl = _gc ? ('repeat('+_gc+',minmax(0,1fr))') : (portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat(auto-fill,minmax(280px,1fr))');
+  var _gridGap = (portrait||_gc) ? '16px 8px' : '24px 16px';
   if (props.loading && !rawItems.length) {
-    return html`<div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat(auto-fill,minmax(280px,1fr))',gap:portrait?'16px 8px':'24px 16px'}}>
+    return html`<div style=${{display:'grid',gridTemplateColumns:_gridTpl,gap:_gridGap}}>
       ${Array.from({length:15},function(_,i){return html`<${SkeletonCard} key=${i}/>`; })}</div>`;
   }
   if (!rawItems.length) {
@@ -1801,11 +2455,11 @@ function VideoGrid(props) {
     ${!externalSort?html`<div style=${{display:'flex',alignItems:'center',gap:4,marginBottom:12}}>
       <${SortButton} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory}/>
     </div>`:null}
-    <div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat(auto-fill,minmax(280px,1fr))',gap:portrait?'16px 8px':'24px 16px'}}>
+    <div style=${{display:'grid',gridTemplateColumns:_gridTpl,gap:_gridGap}}>
       ${shown.map(function(it,i){
         var p=it.post; var reason=it.reason;
         var isRepost=reason&&reason['$type']==='app.bsky.feed.defs#reasonRepost';
-        var reposter=isRepost?(reason.by||null):null;
+        var reposter=isRepost?(reason.by||null):(p&&p._repostedBy||null);
         return html`<${VideoCard} key=${(p&&p.uri)||i} post=${p} repostedBy=${reposter} session=${props.session||null} onWatch=${props.onWatch} onChannel=${props.onChannel} onShare=${props.onShare||null} onRemovedFromPlaylist=${props.onRemovedFromPlaylist||null} currentPlaylistUri=${props.currentPlaylistUri||null}/>`;
       })}
     </div>
@@ -1860,11 +2514,16 @@ function loadAccent(){ try{return localStorage.getItem(ACCENT_KEY)||'#00FF07';}c
 function saveAccent(v){ try{localStorage.setItem(ACCENT_KEY,v);}catch(e){} }
 function loadFilter(){ try{return localStorage.getItem(FILTER_KEY)||'all';}catch(e){return 'all';} }
 function saveFilter(v){ try{localStorage.setItem(FILTER_KEY,v);}catch(e){} }
+const CONTENT_SUB_KEY = 'raccnet_content_sub';
+function loadContentSub(){ try{return localStorage.getItem(CONTENT_SUB_KEY)||'Videos';}catch(e){return 'Videos';} }
+function saveContentSub(v){ try{localStorage.setItem(CONTENT_SUB_KEY,v);}catch(e){} }
 function loadThoughtsHide(){ try{return localStorage.getItem('raccnet_thoughts_hide')||'';}catch(e){return '';} }
 function saveThoughtsHide(v){ try{if(v)localStorage.setItem('raccnet_thoughts_hide',v);else localStorage.removeItem('raccnet_thoughts_hide');}catch(e){} }
 const MOBILECOLS_KEY = 'raccnet_mobilecols';
 function loadMobileCols(){ try{var v=parseInt(localStorage.getItem(MOBILECOLS_KEY));return (v>=1&&v<=5)?v:1;}catch(e){return 1;} }
 function saveMobileCols(v){ try{localStorage.setItem(MOBILECOLS_KEY,String(v));window.dispatchEvent(new CustomEvent("raccnet_mobilecols",{detail:v}));}catch(e){} }
+function loadGridSize(mode,orient){try{var k='raccnet_grid_'+mode+'_'+orient;var v=parseInt(localStorage.getItem(k));if(v>=1&&v<=10)return v;if(mode==='images')return orient==='landscape'?6:3;return orient==='landscape'?5:1;}catch(e){if(mode==='images')return orient==='landscape'?6:3;return orient==='landscape'?5:1;}}
+function saveGridSize(mode,orient,v){try{localStorage.setItem('raccnet_grid_'+mode+'_'+orient,String(Math.max(1,Math.min(10,v))));}catch(e){}}
 function hexToRgb(hex){
   var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
   return isNaN(r)?null:{r:r,g:g,b:b};
@@ -1906,7 +2565,9 @@ function addToHistory(post){
     record:{text:(post.record&&post.record.text)||''},
     embed:{$type:(post.embed&&post.embed['$type'])||'',
       thumbnail:(post.embed&&post.embed.thumbnail)||null,
-      playlist:(post.embed&&post.embed.playlist)||null},
+      playlist:(post.embed&&post.embed.playlist)||null,
+      images:(post.embed&&post.embed.images)||null},
+    _repostedBy:(post._repostedBy||null),
     author:{did:(post.author&&post.author.did)||'',
       handle:(post.author&&post.author.handle)||'',
       displayName:(post.author&&post.author.displayName)||'',
@@ -2134,8 +2795,10 @@ function FriendsFeed(props) {
   const [postItems,setPostItems]= useState([]);  // non-video post items (with sender)
   const [playlistItems, setPlaylistItems] = useState([]);  // shared playlist items
   const [channelItems, setChannelItems] = useState([]);  // shared channel profile cards
-  const [senders,  setSenders]  = useState([]);
-  const [subTab,   setSubTab]   = useState('Videos');
+  const [senders,      setSenders]      = useState([]);
+  const [contentSub,   setContentSub]   = useState(function(){return loadContentSub();});
+  useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
+  const [gridSizeTick, setGridSizeTick] = useState(0);
   const [loading,  setLoading]  = useState(false);
   const [loaded,   setLoaded]   = useState(false);
   const [err,      setErr]      = useState('');
@@ -2151,7 +2814,6 @@ function FriendsFeed(props) {
     restoreScrollPos('friendsfeed');
     return function(){ saveScrollPos('friendsfeed'); };
   },[]);
-
   function chatUrl(path) {
     var pdsHost = sess&&sess.pdsDid ? sess.pdsDid.replace('did:web:','') : 'bsky.social';
     return CHAT_PROXY+path+'?_pds='+encodeURIComponent(pdsHost);
@@ -2402,11 +3064,6 @@ function FriendsFeed(props) {
     <p style=${{fontSize:13,color:'#555'}}>When a friend DMs you something, it will appear here.</p>
   </div>`;
 
-  const tabSt2=function(a){return {padding:'6px 14px',background:a?'var(--accent)':'none',color:a?'#000':'#aaa',
-    border:'none',fontSize:13,fontWeight:600,cursor:'pointer',borderRadius:0};};
-  var shownItems = applySortFilter(items.map(function(it){return it.post?it:{post:it};}), sortOrder, timeRange)
-    .map(function(x){return x.post&&x.post.sender!==undefined?x.post:items[items.indexOf(x)]||x;});
-  // Simpler: just sort the raw items array by post date/likes/reposts
   var sortedItems = items.slice();
   sortedItems = filterByContent(sortedItems.map(function(x){return {post:x.post,_item:x};}),contentFilter).map(function(x){return x._item||x;});
   if(hideLiked) sortedItems = sortedItems.filter(function(it){return !_ffLikedUris.has(it.post&&it.post.uri)&&!viewerLiked(it.post);});
@@ -2417,18 +3074,21 @@ function FriendsFeed(props) {
     var rMs={Daily:86400000,Weekly:604800000,Monthly:2592000000,Yearly:31536000000}[timeRange];
     if (rMs) sortedItems = sortedItems.filter(function(it){var d=(it.post&&it.post.indexedAt)||'';return d&&(Date.now()-new Date(d).getTime())<=rMs;});
   }
+  var gridMode = contentSub==='Images'?'images':'videos';
+  var gridOrient = portrait?'portrait':'landscape';
+  var imgCols = loadGridSize('images',gridOrient);
+  var btnSt2 = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
   return html`<div style=${{padding:24}}>
-    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,
-      position:'sticky',top:0,zIndex:50,background:'#0f0f0f',padding:'12px 0',marginLeft:'-0px'}}>
+    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8,
+      position:'sticky',top:0,zIndex:50,background:'#0f0f0f',padding:'12px 0'}}>
       <h2 style=${{color:'#f1f1f1',fontSize:20,fontWeight:700,margin:0}}>From Friends</h2>
-      <div style=${{display:'flex',gap:4,alignItems:'center'}}>
-        <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory}/>
-        <button style=${tabSt2(subTab==='Videos')} onClick=${function(){setSubTab('Videos');}}>Videos</button>
-        <button style=${tabSt2(subTab==='Posts')}  onClick=${function(){setSubTab('Posts');}}>Posts</button>
+      <div style=${{display:'flex',gap:4,alignItems:'center',flexWrap:'wrap'}}>
+        <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?gridMode:null} gridOrient=${gridOrient} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
+        ${['Hybrid','Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){setContentSub(s);}} style=${btnSt2(contentSub===s)}>${s}</button>`;})}
       </div>
     </div>
     ${senders.length>0?html`<${FollowStrip} actors=${senders} onChannel=${props.onChannel}/>`:null}
-    ${subTab==='Videos'?(function(){
+    ${contentSub==='Videos'?(function(){
       // Build unified mixed grid sorted by sentAt
       var mixedGrid=[];
       sortedItems.forEach(function(it){ mixedGrid.push({_gt:'video',sentAt:it.sentAt||it.post&&it.post.indexedAt||'',item:it}); });
@@ -2482,7 +3142,8 @@ function FriendsFeed(props) {
         }):html`<div style=${{padding:'32px 0',color:'#555',fontSize:14,gridColumn:'1/-1'}}>No videos shared with you yet.</div>`}
       </div>`;
     })():null}
-    ${subTab==='Posts'?html`<${ChannelPostsFeed}
+    ${contentSub==='Images'?html`<${PostImageGrid} items=${postItems.map(function(x){return {post:x.post};})} cols=${imgCols} loading=${loading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`:null}
+    ${contentSub==='Timeline'?html`<${ChannelPostsFeed}
       posts=${postItems.map(function(x){return {post:x.post};})}
       loading=${false}
       session=${props.session}
@@ -2492,6 +3153,20 @@ function FriendsFeed(props) {
       stateKey=${'friends'}
       sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}
     />`:null}
+    ${contentSub==='Hybrid'?(function(){
+      var allFF=[];
+      sortedItems.forEach(function(it){allFF.push({type:'video',sentAt:it.sentAt||it.post&&it.post.indexedAt||'',item:it});});
+      postItems.forEach(function(it){allFF.push({type:'post',sentAt:it.sentAt||it.post&&it.post.indexedAt||'',item:it});});
+      playlistItems.forEach(function(it){allFF.push({type:'playlist',sentAt:it.sentAt||'',item:it});});
+      channelItems.forEach(function(it){allFF.push({type:'channel',sentAt:it.sentAt||'',item:it});});
+      allFF.sort(function(a,b){return b.sentAt.localeCompare(a.sentAt);});
+      if(!allFF.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>Nothing shared with you yet.</div>`;
+      return html`<div>${allFF.map(function(entry,i){
+        if(entry.type==='video') return html`<${FriendCard} key=${'v'+i} item=${entry.item} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
+        if(entry.type==='post') return html`<${PostCard} key=${'p'+i} item=${{post:entry.item.post}} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
+        return null;
+      })}</div>`;
+    })():null}
   </div>`;
 }
 
@@ -2705,10 +3380,12 @@ function SubscribedFeedPage(props) {
 function SubsPage(props) {
   const portrait = usePortrait();
   const mobileCols = loadMobileCols();
-  const [tab,         setTab]         = useState('Videos');
+  const [contentSub,  setContentSub]  = useState(function(){return loadContentSub();});
+  useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
   const [subsPosts,   setSubsPosts]   = useState([]);
   const [postsLoading,setPostsLoading]= useState(false);
   const [postsLoaded, setPostsLoaded] = useState(false);
+  const [gridSizeTick,setGridSizeTick]= useState(0);
   const _subsSort = loadSubsSort();
   const [sortOrder,   setSortOrder]   = useState(function(){return _subsSort.sortOrder;});
   const [timeRange,   setTimeRange]   = useState(function(){return _subsSort.timeRange;});
@@ -2720,55 +3397,48 @@ function SubsPage(props) {
     restoreScrollPos('subspage');
     return function(){ saveScrollPos('subspage'); };
   },[]);
-
   async function loadPostsData(sess) {
     setPostsLoading(true);
     try {
+      _devLog('API','read','getTimeline');
       var r = await api(AUTH_PROXY+'/app.bsky.feed.getTimeline?limit=100',
         {headers:{Authorization:'Bearer '+sess.accessJwt}});
-      if (r.ok) {
-        var d = await r.json();
-        setSubsPosts(d.feed||[]);
-        setPostsLoaded(true);
-      }
+      if (r.ok) { var d = await r.json(); setSubsPosts(d.feed||[]); setPostsLoaded(true); }
     } catch(e){ console.error(e); }
     setPostsLoading(false);
   }
 
-  async function openTab(t) {
-    setTab(t);
-    if (t === 'Posts' && !postsLoaded && props.session) {
-      await loadPostsData(props.session);
+  function openContentSub(s) {
+    setContentSub(s);
+    if ((s==='Timeline'||s==='Images'||s==='Hybrid') && !postsLoaded && props.session) {
+      loadPostsData(props.session);
     }
   }
 
-  // If the page was restored with Posts tab active, load posts immediately
+  // If timeline is needed and not loaded yet (e.g. restored state)
   useEffect(function(){
-    if (tab === 'Posts' && !postsLoaded && props.session) {
+    if ((contentSub==='Timeline'||contentSub==='Images'||contentSub==='Hybrid') && !postsLoaded && props.session) {
       loadPostsData(props.session);
     }
   }, [props.session]);
 
-  const tabSt = function(a){ return {
-    padding:'10px 20px',background:'none',border:'none',cursor:'pointer',fontSize:14,
-    color:a?'var(--accent)':'#aaa',fontWeight:a?500:400,
-    borderBottom:'3px solid '+(a?'var(--accent)':'transparent')
-  };};
+  var gridMode = contentSub==='Images'?'images':'videos';
+  var gridOrient = portrait?'portrait':'landscape';
+  var imgCols = loadGridSize('images',gridOrient);
+  var vidCols = loadGridSize('videos',gridOrient);
+  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
 
   return html`<div style=${{padding:24}}>
-    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:12,
+    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8,
       position:'sticky',top:0,zIndex:50,background:'#0f0f0f',padding:'12px 0'}}>
       <h2 style=${{color:'#f1f1f1',fontSize:20,fontWeight:700,margin:0}}>Subscriptions</h2>
-      <div style=${{display:'flex',alignItems:'center',gap:0}}>
-        <${SortButton} variant='underline' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory}/>
-        <button onClick=${function(){openTab('Videos');}} style=${tabSt(tab==='Videos')}>Videos</button>
-        <button onClick=${function(){openTab('Posts');}}  style=${tabSt(tab==='Posts')}>Posts</button>
+      <div style=${{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
+        <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?gridMode:null} gridOrient=${gridOrient} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
+        ${['Hybrid','Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){openContentSub(s);}} style=${btnSt(contentSub===s)}>${s}</button>`;})}
       </div>
     </div>
-    ${props.followStrip&&props.followStrip.length>0?html`
-      <${FollowStrip} actors=${props.followStrip} onChannel=${props.onChannel}/>
-    `:null}
-    ${tab==='Videos'?html`<div>
+    ${props.followStrip&&props.followStrip.length>0?html`<${FollowStrip} actors=${props.followStrip} onChannel=${props.onChannel}/>`:null}
+    ${contentSub==='Videos'?html`<div>
       ${props.loading?html`<div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat(auto-fill,minmax(280px,1fr))',gap:portrait?'16px 8px':'24px 16px'}}>
         ${[0,1,2,3,4,5,6,7].map(function(i){return html`<${SkeletonCard} key=${i}/>`;})}
       </div>`:null}
@@ -2777,21 +3447,33 @@ function SubsPage(props) {
         <p style=${{fontSize:16}}>No videos from people you follow.</p>
         <p style=${{fontSize:13,color:'#555'}}>Follow people on Bluesky who post videos and they'll appear here.</p>
       </div>`:null}
-      ${!props.loading&&props.videos&&props.videos.length?html`<${VideoGrid} videos=${props.videos} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} setHideHistory=${setHideHistory}/>`:null}
+      ${!props.loading&&props.videos&&props.videos.length?html`<${VideoGrid} videos=${props.videos} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} setHideHistory=${setHideHistory} gridCols=${vidCols} _tick=${gridSizeTick}/>`:null}
     </div>`:null}
-    ${tab==='Posts'?html`<${ChannelPostsFeed} posts=${subsPosts} loading=${postsLoading} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey=${'subs'} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
+    ${contentSub==='Images'?html`<${PostImageGrid} items=${subsPosts} cols=${imgCols} loading=${postsLoading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`:null}
+    ${contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${subsPosts} loading=${postsLoading} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey=${'subs'} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
+    ${contentSub==='Hybrid'?html`<div>${(function(){
+      var vidItems=(props.videos||[]).map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
+      var postFeedItems=subsPosts.filter(function(x){var p=x.post||x;return !isVid(p)&&!isVidRaw(p);}).map(function(x){return {type:'post',item:x,date:new Date(((x.post||x).indexedAt||(x.post||x).record&&(x.post||x).record.createdAt||0)).getTime()};});
+      var combined=vidItems.concat(postFeedItems).sort(function(a,b){return b.date-a.date;});
+      if(!combined.length&&(props.loading||postsLoading)) return html`<div style=${{color:'#aaa',padding:'32px',textAlign:'center'}}>Loading…</div>`;
+      if(!combined.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No content.</div>`;
+      return html`<div>${combined.map(function(x,i){
+        if(x.type==='vid') return html`<${VideoGrid} key=${'v'+i} videos=${[x.post]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
+        return html`<${PostCard} key=${'p'+i} item=${x.item} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
+      })}</div>`;
+    })()}</div>`:null}
   </div>`;
 }
 
 // ── Feed Page ─────────────────────────────────────────────────────────────────
 function FeedPage(props) {
-  const [tab,          setTab]          = useState('Videos');
-  const [feedVideos,   setFeedVideos]   = useState([]);
+  const portrait = usePortrait();
+  const [contentSub,   setContentSub]   = useState(function(){return loadContentSub();});
+  useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
+  const [feedAllItems, setFeedAllItems] = useState([]); // raw feed items [{post,reason?}]
   const [feedLoading,  setFeedLoading]  = useState(false);
   const [feedCursor,   setFeedCursor]   = useState(null);
-  const [feedPosts,    setFeedPosts]    = useState([]);
-  const [postsLoading, setPostsLoading] = useState(false);
-  const [loadedUri,    setLoadedUri]    = useState(null);
+  const [gridSizeTick, setGridSizeTick] = useState(0);
   const _feedSort = loadFeedSort();
   const [sortOrder,    setSortOrder]    = useState(function(){return _feedSort.sortOrder;});
   const [timeRange,    setTimeRange]    = useState(function(){return _feedSort.timeRange;});
@@ -2800,126 +3482,94 @@ function FeedPage(props) {
   const [hideHistory,  setHideHistory]  = useState(function(){return !!_feedSort.hideHistory;});
   useEffect(function(){saveFeedSort({sortOrder,timeRange,hideLiked,contentFilter,hideHistory});},[sortOrder,timeRange,hideLiked,contentFilter,hideHistory]);
 
-  // Load videos whenever feedUri changes
+  // feedAllItems stores raw feed items [{post, reason?}] — compatible with ChannelPostsFeed
+  // Load ALL feed items whenever feedUri changes; try public then auth fallback
   useEffect(function(){
     if(!props.feedUri) return;
-    var cancelled = false;
-    var sess = props.session;
-    setFeedLoading(true); setFeedVideos([]); setFeedCursor(null);
-    var seen=new Set(); var videos=[];
-    function addVids(posts){
-      (posts||[]).forEach(function(p){if(p&&isVid(p)&&!seen.has(p.uri)&&!(p.record&&p.record.reply)){videos.push(p);seen.add(p.uri);}});
-    }
+    var cancelled=false;
+    var sess=props.session;
+    setFeedLoading(true); setFeedAllItems([]); setFeedCursor(null);
+    var seen=new Set(); var allItems=[];
     (async function(){
       try{
-        var authOpts=sess?{headers:{Authorization:'Bearer '+sess.accessJwt}}:{};
-        var cursor=null;
-        function mapItem(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;}
-        // Loop auth proxy until 20 videos or no cursor
-        if(sess){
-          try{
-            var aCursor=null;
-            for(var aPage=0;videos.length<20&&aPage<8&&!cancelled;aPage++){
-              var r=null;
-              try{r=await api(AUTH_PROXY+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100'+(aCursor?'&cursor='+encodeURIComponent(aCursor):''),authOpts);}catch(e){break;}
-              if(!r||!r.ok) break;
-              var d=await r.json();
-              addVids((d.feed||[]).map(mapItem));
-              aCursor=d.cursor||null; cursor=aCursor;
-              if(!aCursor) break;
-            }
-          }catch(e){}
+        var pCursor=null;
+        for(var pPage=0;pPage<3&&!cancelled;pPage++){
+          var r=null;
+          var url='/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100'+(pCursor?'&cursor='+encodeURIComponent(pCursor):'');
+          _devLog('API','read','getFeed:'+props.feedUri);
+          try{r=await api(PUB_PROXY+url);}catch(e){}
+          if((!r||!r.ok)&&sess){try{r=await api(AUTH_PROXY+url,{headers:{Authorization:'Bearer '+sess.accessJwt}});}catch(e){}}
+          if(!r||!r.ok) break;
+          var d=await r.json();
+          (d.feed||[]).forEach(function(i){if(i.post&&!seen.has(i.post.uri)){seen.add(i.post.uri);allItems.push(i);}});
+          pCursor=d.cursor||null;
+          if(!pCursor) break;
         }
-        // Supplement with public proxy if still under 20
-        if(videos.length<20&&!cancelled){
-          try{
-            var pCursor=null;
-            for(var pPage=0;videos.length<20&&pPage<8&&!cancelled;pPage++){
-              var r2=null;
-              try{r2=await api(PUB_PROXY+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100'+(pCursor?'&cursor='+encodeURIComponent(pCursor):''));}catch(e){break;}
-              if(!r2||!r2.ok) break;
-              var d2=await r2.json();
-              addVids((d2.feed||[]).map(mapItem));
-              pCursor=d2.cursor||null;
-              if(!cursor) cursor=pCursor;
-              if(!pCursor) break;
-            }
-          }catch(e){}
-        }
-        if(!cancelled){ setFeedCursor(cursor); setFeedVideos(videos); }
-      }catch(e){ console.error('FeedPage loadVideos:',e); }
+        if(!cancelled){ setFeedCursor(pCursor); setFeedAllItems(allItems); }
+      }catch(e){ console.error('FeedPage load:',e); }
       if(!cancelled) setFeedLoading(false);
     })();
     return function(){cancelled=true;};
   },[props.feedUri, props.session&&props.session.accessJwt]);
 
-  async function loadMoreVideos(){
+  async function loadMoreItems(){
     if(!feedCursor||!props.feedUri||feedLoading) return;
+    var sess=props.session;
     setFeedLoading(true);
     try{
-      var authOpts=props.session?{headers:{Authorization:'Bearer '+props.session.accessJwt}}:{};
-      var endpoint=props.session?AUTH_PROXY:PUB_PROXY;
-      var cursor=feedCursor;
-      var newVids=[]; var seenNew=new Set(feedVideos.map(function(p){return p.uri;}));
-      function mapItem2(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;}
-      for(var pg=0;newVids.length<20&&cursor&&pg<8;pg++){
+      var seen=new Set(feedAllItems.map(function(x){return x.post&&x.post.uri;}));
+      var newItems=[]; var cursor=feedCursor;
+      for(var pg=0;pg<3&&cursor;pg++){
         var r=null;
-        try{r=await api(endpoint+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100&cursor='+encodeURIComponent(cursor),authOpts);}catch(e){break;}
+        var url=AUTH_PROXY+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100&cursor='+encodeURIComponent(cursor);
+        try{r=await api(PUB_PROXY+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(props.feedUri)+'&limit=100&cursor='+encodeURIComponent(cursor));}catch(e){}
+        if((!r||!r.ok)&&sess){try{r=await api(url,{headers:{Authorization:'Bearer '+sess.accessJwt}});}catch(e){}}
         if(!r||!r.ok) break;
         var d=await r.json();
-        (d.feed||[]).map(mapItem2).filter(function(p){return p&&isVid(p)&&!seenNew.has(p.uri)&&!(p.record&&p.record.reply);}).forEach(function(p){newVids.push(p);seenNew.add(p.uri);});
+        (d.feed||[]).forEach(function(i){if(i.post&&!seen.has(i.post.uri)){seen.add(i.post.uri);newItems.push(i);}});
         cursor=d.cursor||null;
+        if(!cursor) break;
       }
-      setFeedVideos(function(prev){return prev.concat(newVids);});
+      setFeedAllItems(function(prev){return prev.concat(newItems);});
       setFeedCursor(cursor);
-    }catch(e){ console.error('FeedPage loadMoreVideos:',e); }
+    }catch(e){ console.error('FeedPage loadMore:',e); }
     setFeedLoading(false);
   }
 
-  async function loadPosts(uri, sess) {
-    if (!uri) return;
-    setPostsLoading(true); setFeedPosts([]);
-    try {
-      const authOpts = sess ? {headers:{Authorization:'Bearer '+sess.accessJwt}} : {};
-      const endpoint = sess ? AUTH_PROXY : PUB_PROXY;
-      const r = await api(endpoint+'/app.bsky.feed.getFeed?feed='+encodeURIComponent(uri)+'&limit=100', authOpts);
-      if (r.ok) { const d = await r.json(); setFeedPosts(d.feed||[]); }
-    } catch(e) { console.error(e); }
-    setPostsLoading(false); setLoadedUri(uri);
-  }
+  // Computed views — map feed items to posts for VideoGrid (applies repost author)
+  function _mapPost(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;}
+  var feedVideos = feedAllItems.filter(function(i){return i.post&&(isVid(i.post)||isVidRaw(i.post))&&!(i.post.record&&i.post.record.reply);}).map(_mapPost);
+  var gridMode = (contentSub==='Videos'||contentSub==='Hybrid')?'videos':'images';
+  var gridOrient = portrait?'portrait':'landscape';
+  var imgCols = loadGridSize('images',gridOrient);
+  var vidCols = loadGridSize('videos',gridOrient);
 
-  async function openTab(t) {
-    setTab(t);
-    if (t === 'Posts' && props.feedUri && props.feedUri !== loadedUri) {
-      await loadPosts(props.feedUri, props.session);
-    }
-  }
-
-  // When feedUri changes while on Posts tab, reload automatically
-  useEffect(function() {
-    if (tab === 'Posts' && props.feedUri && props.feedUri !== loadedUri) {
-      loadPosts(props.feedUri, props.session);
-    }
-  }, [props.feedUri]);
-
-  const tabSt = function(active) { return {
-    padding:'10px 20px',background:'none',border:'none',
-    color:active?'var(--accent)':'#aaa',fontSize:14,fontWeight:active?500:400,
-    borderBottom:'3px solid '+(active?'var(--accent)':'transparent'),cursor:'pointer'
-  };};
+  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
 
   return html`<div style=${{padding:24}}>
-    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:12,
+    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8,
       position:'sticky',top:0,zIndex:50,background:'#0f0f0f',padding:'12px 0'}}>
       <h2 style=${{color:'#f1f1f1',fontSize:20,fontWeight:700,margin:0}}>${props.feedName||'Feed'}</h2>
-      <div style=${{display:'flex',alignItems:'center',gap:0}}>
-        <${SortButton} variant='underline' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory}/>
-        <button onClick=${function(){openTab('Videos');}} style=${tabSt(tab==='Videos')}>Videos</button>
-        <button onClick=${function(){openTab('Posts');}}  style=${tabSt(tab==='Posts')}>Posts</button>
+      <div style=${{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
+        <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory}
+          gridMode=${(contentSub==='Videos'||contentSub==='Images')?gridMode:null} gridOrient=${gridOrient} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
+        ${['Hybrid','Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){setContentSub(s);}} style=${btnSt(contentSub===s)}>${s}</button>`;})}
       </div>
     </div>
-    ${tab==='Videos'?html`<${VideoGrid} videos=${feedVideos} loading=${feedLoading} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} setHideHistory=${setHideHistory} hasMoreFromAPI=${!!feedCursor} onLoadMoreAPI=${loadMoreVideos}/>`:null}
-    ${tab==='Posts'?html`<${ChannelPostsFeed} posts=${feedPosts} loading=${postsLoading} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey=${'feedPosts'} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
+    ${contentSub==='Videos'?html`<${VideoGrid} videos=${feedVideos} loading=${feedLoading} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} setHideHistory=${setHideHistory} hasMoreFromAPI=${!!feedCursor} onLoadMoreAPI=${loadMoreItems} gridCols=${vidCols} _tick=${gridSizeTick}/>`:null}
+    ${contentSub==='Images'?html`<${PostImageGrid} items=${feedAllItems} cols=${imgCols} loading=${feedLoading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`:null}
+    ${contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${feedAllItems} loading=${feedLoading} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey=${'feedTimeline'} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
+    ${contentSub==='Hybrid'?html`<div>${(function(){
+      var vidItems=feedVideos.map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
+      var postItems=feedAllItems.filter(function(i){return i.post&&!isVid(i.post)&&!isVidRaw(i.post);}).map(function(i){return {type:'post',item:i,date:new Date((i.post.indexedAt||i.post.record&&i.post.record.createdAt||0)).getTime()};});
+      var combined=vidItems.concat(postItems).sort(function(a,b){return b.date-a.date;});
+      if(!combined.length&&feedLoading) return html`<div style=${{color:'#aaa',padding:'32px',textAlign:'center'}}>Loading…</div>`;
+      if(!combined.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No content.</div>`;
+      return html`<div>${combined.map(function(x,i){
+        if(x.type==='vid') return html`<${VideoGrid} key=${'v'+i} videos=${[x.post]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
+        return html`<${PostCard} key=${'p'+i} item=${x.item} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
+      })}</div>`;
+    })()}</div>`:null}
   </div>`;
 }
 
@@ -3041,23 +3691,6 @@ function SettingsPage(props) {
 
 
 
-    ${section('Mobile Grid Size', html`<div>
-      <div style=${{color:'#aaa',fontSize:13,marginBottom:12}}>Number of video columns shown horizontally in portrait mode. Works across all video feeds.</div>
-      <div style=${{display:'flex',gap:6,flexWrap:'wrap'}}>
-        ${[1,2,3,4,5].map(function(n){
-          var isActive=mobileCols===n;
-          return html`<button key=${n} onClick=${function(){setMobileCols(n);saveMobileCols(n);}}
-            style=${{width:44,height:44,border:'1px solid '+(isActive?'var(--accent)':'#3f3f3f'),
-              background:isActive?'var(--accent)':'none',color:isActive?'#000':'#aaa',
-              fontSize:15,cursor:'pointer',borderRadius:0,fontWeight:isActive?700:400,
-              transition:'all 0.15s'}}>
-            ${n}
-          </button>`;
-        })}
-      </div>
-      <div style=${{color:'#555',fontSize:12,marginTop:8}}>${mobileCols === 1 ? 'Full width' : mobileCols === 2 ? 'Default (2 columns)' : mobileCols+' columns — smaller cards'}</div>
-    </div>`)}
-
     ${(function(){
       var [thoughtsHideSetting, setThoughtsHideSetting] = useState(function(){return loadThoughtsHide();});
       function setAndSave(v){setThoughtsHideSetting(v);saveThoughtsHide(v);}
@@ -3129,6 +3762,33 @@ function SettingsPage(props) {
       </div>
     </div>`)}
 
+    ${section('Cache', html`<div>
+      <div style=${{color:'#aaa',fontSize:13,marginBottom:12}}>Clear all cached PDS data. Forces RaccNet to re-fetch channel settings and feed content from the server.</div>
+      <button onClick=${async function(){
+        try {
+          await caches.delete(SETTINGS_CACHE_NAME);
+          await caches.delete(FEED_CACHE_NAME);
+          _devLog('CACHE','clear','all caches deleted');
+          alert('Cache cleared.');
+        } catch(e){ alert('Error: '+e); }
+      }}
+        style=${{padding:'8px 20px',background:'none',border:'1px solid #ff6644',color:'#ff6644',fontSize:13,cursor:'pointer',fontWeight:600,borderRadius:0}}>
+        Reset PDS Cache
+      </button>
+    </div>`)}
+
+    ${section('Developer Mode', html`<div>
+      <div style=${{color:'#aaa',fontSize:13,marginBottom:12}}>Shows a live console overlay with PDS and cache activity.</div>
+      <button onClick=${function(){
+        var on=localStorage.getItem('raccnet_devmode')!=='1';
+        if(on){localStorage.setItem('raccnet_devmode','1');}else{localStorage.removeItem('raccnet_devmode');}
+        window.location.reload();
+      }}
+        style=${{padding:'8px 20px',background:'none',border:'1px solid var(--accent)',color:'var(--accent)',fontSize:13,cursor:'pointer',fontWeight:600}}>
+        ${localStorage.getItem('raccnet_devmode')==='1'?'Disable Dev Mode':'Enable Dev Mode'}
+      </button>
+    </div>`)}
+
   </div>`;
 }
 
@@ -3136,6 +3796,10 @@ function SettingsPage(props) {
 // ── HistoryPage ──────────────────────────────────────────────────────────────
 function HistoryPage(props) {
   const [history, setHistory] = useState(function(){return loadHistory();});
+  const [contentSub, setContentSub] = useState(function(){return loadContentSub();});
+  useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
+  const portrait = usePortrait();
+  const imgCols = loadGridSize('images', portrait?'portrait':'landscape');
   useEffect(function(){
     syncHistoryFromServer().then(function(d){if(d!==null)setHistory(d);});
     restoreScrollPos('historypage');
@@ -3144,22 +3808,41 @@ function HistoryPage(props) {
   function clearHistory(){
     saveHistory([]); setHistory([]);
   }
+  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
+  var imgItems = history.map(function(h){return {post:h};});
+  var vidItems = history.filter(function(h){return isVid(h);});
+  var emptyIcon = html`<svg width="64" height="64" viewBox="0 0 24 24" fill="#3f3f3f"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>`;
   return html`<div style=${{padding:24}}>
-    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8}}>
       <h2 style=${{color:'#f1f1f1',fontSize:20,fontWeight:700,margin:0}}>Watch History</h2>
-      ${history.length>0?html`<button onClick=${clearHistory}
-        style=${{background:'none',border:'1px solid #3f3f3f',color:'#aaa',padding:'6px 14px',
-          fontSize:13,cursor:'pointer',borderRadius:0}}
-        onMouseEnter=${function(e){e.currentTarget.style.color='#f1f1f1';e.currentTarget.style.borderColor='#f1f1f1';}}
-        onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';e.currentTarget.style.borderColor='#3f3f3f';}}>
-        Clear History
-      </button>`:null}
+      <div style=${{display:'flex',gap:4,alignItems:'center',flexWrap:'wrap'}}>
+        ${['Hybrid','Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){setContentSub(s);}} style=${btnSt(contentSub===s)}>${s}</button>`;})}
+        ${history.length>0?html`<button onClick=${clearHistory}
+          style=${{background:'none',border:'1px solid #3f3f3f',color:'#aaa',padding:'6px 14px',
+            fontSize:13,cursor:'pointer',borderRadius:0,marginLeft:8}}
+          onMouseEnter=${function(e){e.currentTarget.style.color='#f1f1f1';e.currentTarget.style.borderColor='#f1f1f1';}}
+          onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';e.currentTarget.style.borderColor='#3f3f3f';}}>
+          Clear History
+        </button>`:null}
+      </div>
     </div>
     ${!history.length?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'50vh',gap:16,color:'#aaa'}}>
-      <svg width="64" height="64" viewBox="0 0 24 24" fill="#3f3f3f"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+      ${emptyIcon}
       <p style=${{fontSize:16}}>No watch history yet.</p>
-      <p style=${{fontSize:13,color:'#555'}}>Videos you watch will appear here and are saved locally on your device.</p>
-    </div>`:html`<${VideoGrid} videos=${history} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`}
+      <p style=${{fontSize:13,color:'#555'}}>Videos and images you open will appear here.</p>
+    </div>`:null}
+    ${history.length>0&&contentSub==='Videos'?html`<${VideoGrid} videos=${vidItems} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
+    ${history.length>0&&contentSub==='Images'?html`<${PostImageGrid} items=${imgItems} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`:null}
+    ${history.length>0&&contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${imgItems} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true}/>`:null}
+    ${history.length>0&&contentSub==='Hybrid'?html`<div>
+      ${(function(){
+        var imgPosts = imgItems.filter(function(x){return getPostImages(x.post).length>0;});
+        return html`<div>
+          ${vidItems.length>0?html`<${VideoGrid} videos=${vidItems} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
+          ${imgPosts.length>0?html`<div style=${{marginTop:24}}><${PostImageGrid} items=${imgPosts} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/></div>`:null}
+        </div>`;
+      })()}
+    </div>`:null}
   </div>`;
 }
 
@@ -3777,7 +4460,10 @@ function SeriesPlayer(props) {
     }
   }
   function onTimeUpdate() { if (videoRef.current) setCurrentTime(videoRef.current.currentTime); }
-  function onEnded() { if (currentIdxRef.current < parts.length - 1) setCurrentIdx(currentIdxRef.current + 1); }
+  function onEnded() {
+    if (currentIdxRef.current < parts.length - 1) { setCurrentIdx(currentIdxRef.current + 1); }
+    else if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.play().catch(function(){}); }
+  }
   function onPlay() { setPlaying(true); }
   function onPause() { setPlaying(false); }
 
@@ -4051,8 +4737,217 @@ function NumInput(props) {
 }
 
 // ── GIF Maker Modal ───────────────────────────────────────────────────────────
+// ── ImageGifMakerModal — static image → animated GIF (no fps/trim) ──────────
+function ImageGifMakerModal(props) {
+  var defaultW = props.natW > 0 ? props.natW : 480;
+  const [gifFilename, setGifFilename] = useState('raccnet.gif');
+  const [gifWidth,    setGifWidth]    = useState(defaultW);
+  const [cropLeft,    setCropLeft]    = useState(0);
+  const [cropRight,   setCropRight]   = useState(0);
+  const [cropTop,     setCropTop]     = useState(0);
+  const [cropBottom,  setCropBottom]  = useState(0);
+  const [addText,     setAddText]     = useState(false);
+  const [gifText,     setGifText]     = useState('');
+  const [textBoxH,    setTextBoxH]    = useState(function(){ return parseInt(localStorage.getItem('raccnet_gif_textboxh')  ||'40')||40; });
+  const [textSize,    setTextSize]    = useState(function(){ return parseInt(localStorage.getItem('raccnet_gif_textsize')   ||'16')||16; });
+  const [textWeight,  setTextWeight]  = useState(function(){ return parseFloat(localStorage.getItem('raccnet_gif_textweight') ||'0') ||0; });
+  useEffect(function(){ localStorage.setItem('raccnet_gif_textboxh',  String(textBoxH));   }, [textBoxH]);
+  useEffect(function(){ localStorage.setItem('raccnet_gif_textsize',  String(textSize));   }, [textSize]);
+  useEffect(function(){ localStorage.setItem('raccnet_gif_textweight',String(textWeight)); }, [textWeight]);
+  const [making,    setMaking]    = useState(false);
+  const [error,     setError]     = useState('');
+  const [dragging,  setDragging]  = useState(null);
+  const cropRef = useRef(null);
+
+  useEffect(function(){
+    if (!dragging) return;
+    function onMove(e) {
+      if (!cropRef.current) return;
+      var rect = cropRef.current.getBoundingClientRect();
+      var x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      var y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+      if (dragging==='left')   setCropLeft(Math.min(x * 100, 49));
+      if (dragging==='right')  setCropRight(Math.min((1 - x) * 100, 49));
+      if (dragging==='top')    setCropTop(Math.min(y * 100, 49));
+      if (dragging==='bottom') setCropBottom(Math.min((1 - y) * 100, 49));
+    }
+    function onUp() { setDragging(null); }
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    return function() { document.removeEventListener('pointermove', onMove); document.removeEventListener('pointerup', onUp); };
+  }, [dragging]);
+
+  async function makeGif() {
+    setMaking(true); setError('');
+    try {
+      var resp = await fetch('/make-gif-image', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          image_url: props.imageUrl,
+          width: Math.max(64, Math.min(1920, Math.round(gifWidth))),
+          crop_left: cropLeft, crop_right: cropRight,
+          crop_top: cropTop, crop_bottom: cropBottom,
+          add_text: addText && gifText.trim().length > 0,
+          text: gifText.slice(0, 200),
+          text_box_height: Math.max(10, Math.min(400, Math.round(textBoxH))),
+          text_size: Math.max(6, Math.min(120, Math.round(textSize))),
+          text_weight: Math.max(0, Math.min(10, textWeight))
+        })
+      });
+      if (!resp.ok) {
+        var d = await resp.json().catch(function(){return {};});
+        setError(d.error || 'Failed to create GIF (HTTP ' + resp.status + ')');
+        setMaking(false); return;
+      }
+      var blob = await resp.blob();
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      var fname = (gifFilename||'raccnet').replace(/\.gif$/i,'').trim()||'raccnet';
+      a.href = url; a.download = fname+'.gif';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch(e) { setError('Error: ' + e.message); }
+    setMaking(false);
+  }
+
+  var cl=cropLeft, cr=cropRight, ct=cropTop, cb=cropBottom;
+  var HS=18;
+  var labelSt = {fontSize:11,color:'var(--accent)',marginBottom:3,display:'block',letterSpacing:0.5};
+  var sectionSt = {marginBottom:14};
+  // Preview area: fixed max size, image fills it
+  var pvMaxW = 780, pvMaxH = 560;
+  var natW = props.natW > 0 ? props.natW : pvMaxW;
+  var natH = props.natH > 0 ? props.natH : pvMaxH;
+  var pvW, pvH;
+  if (natW / natH > pvMaxW / pvMaxH) { pvW = pvMaxW; pvH = Math.round(pvMaxW * natH / natW); }
+  else { pvH = pvMaxH; pvW = Math.round(pvMaxH * natW / natH); }
+  pvW = Math.max(80, pvW); pvH = Math.max(60, pvH);
+  var pvScale = pvW / Math.max(1, gifWidth);
+  var previewTextBoxH = Math.max(6, Math.round(textBoxH * pvScale));
+
+  return html`<div onClick=${function(e){if(e.target===e.currentTarget)props.onClose();}}
+    style=${{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.92)',zIndex:4000,display:'flex',alignItems:'center',justifyContent:'center',padding:'16px',boxSizing:'border-box'}}>
+    <div style=${{background:'#141414',border:'1px solid var(--accent)',width:'100%',maxWidth:'min(1300px,96vw)',maxHeight:'97vh',display:'flex',flexDirection:'column',overflow:'hidden',boxShadow:'0 8px 40px rgba(0,0,0,0.8)'}}>
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 16px',borderBottom:'1px solid rgba(0,255,7,0.3)',flexShrink:0,background:'#0f0f0f'}}>
+        <span style=${{color:'var(--accent)',fontWeight:700,fontSize:14,letterSpacing:1.5,textTransform:'uppercase'}}>Download as GIF</span>
+        <button onClick=${props.onClose}
+          style=${{background:'none',border:'1px solid transparent',color:'#aaa',cursor:'pointer',fontSize:18,lineHeight:1,padding:'2px 8px',fontFamily:'Roboto,sans-serif'}}
+          onMouseEnter=${function(e){e.currentTarget.style.color='var(--accent)';e.currentTarget.style.borderColor='var(--accent)';}}
+          onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';e.currentTarget.style.borderColor='transparent';}}>✕</button>
+      </div>
+      <div style=${{display:'flex',flex:1,overflow:'hidden',minHeight:0}}>
+        <div style=${{flex:'1 1 0',minWidth:0,background:'#1a1a1a',display:'flex',alignItems:'center',justifyContent:'center',overflow:'auto',padding:'8px',boxSizing:'border-box'}}>
+          <div style=${{display:'inline-flex',flexDirection:'column',alignItems:'stretch',userSelect:'none',touchAction:'none',lineHeight:0}}>
+            ${addText&&gifText?html`<div style=${{background:'white',display:'flex',alignItems:'center',justifyContent:'center',width:pvW+'px',height:previewTextBoxH+'px',overflow:'hidden',lineHeight:'normal',flexShrink:0,boxSizing:'border-box'}}>
+              <span style=${{color:'#000',fontSize:Math.max(8,Math.round(textSize*pvScale))+'px',padding:'0 8px',textAlign:'center',maxWidth:'100%',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontFamily:'Roboto,sans-serif',
+                WebkitTextStroke:textWeight>0?(textWeight*pvScale*2)+'px black':''}}>${gifText}</span>
+            </div>`:null}
+            <div ref=${cropRef} style=${{position:'relative',lineHeight:0,width:pvW+'px',height:pvH+'px',flexShrink:0,overflow:'hidden'}}>
+              <img src=${props.imageUrl} alt="" style=${{display:'block',width:'100%',height:'100%',objectFit:'fill',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',top:0,left:0,width:cl+'%',height:'100%',background:'rgba(0,0,0,0.55)',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',top:0,right:0,width:cr+'%',height:'100%',background:'rgba(0,0,0,0.55)',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',top:0,left:cl+'%',width:(100-cl-cr)+'%',height:ct+'%',background:'rgba(0,0,0,0.55)',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',bottom:0,left:cl+'%',width:(100-cl-cr)+'%',height:cb+'%',background:'rgba(0,0,0,0.55)',pointerEvents:'none'}}/>
+              <div style=${{position:'absolute',top:ct+'%',bottom:cb+'%',left:cl+'%',right:cr+'%',border:'2px solid var(--accent)',pointerEvents:'none',boxSizing:'border-box'}}/>
+              <div onPointerDown=${function(e){e.preventDefault();setDragging('left');}}
+                style=${{position:'absolute',top:'50%',left:'calc('+cl+'% - '+Math.round(HS/2)+'px)',transform:'translateY(-50%)',width:HS,height:HS*2,background:'var(--accent)',cursor:'ew-resize',zIndex:10,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <div style=${{width:2,height:HS,background:'#000',pointerEvents:'none'}}/>
+              </div>
+              <div onPointerDown=${function(e){e.preventDefault();setDragging('right');}}
+                style=${{position:'absolute',top:'50%',right:'calc('+cr+'% - '+Math.round(HS/2)+'px)',transform:'translateY(-50%)',width:HS,height:HS*2,background:'var(--accent)',cursor:'ew-resize',zIndex:10,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <div style=${{width:2,height:HS,background:'#000',pointerEvents:'none'}}/>
+              </div>
+              <div onPointerDown=${function(e){e.preventDefault();setDragging('top');}}
+                style=${{position:'absolute',top:'calc('+ct+'% - '+Math.round(HS/2)+'px)',left:'50%',transform:'translateX(-50%)',width:HS*2,height:HS,background:'var(--accent)',cursor:'ns-resize',zIndex:10,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <div style=${{height:2,width:HS,background:'#000',pointerEvents:'none'}}/>
+              </div>
+              <div onPointerDown=${function(e){e.preventDefault();setDragging('bottom');}}
+                style=${{position:'absolute',bottom:'calc('+cb+'% - '+Math.round(HS/2)+'px)',left:'50%',transform:'translateX(-50%)',width:HS*2,height:HS,background:'var(--accent)',cursor:'ns-resize',zIndex:10,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <div style=${{height:2,width:HS,background:'#000',pointerEvents:'none'}}/>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style=${{width:280,flexShrink:0,borderLeft:'1px solid rgba(0,255,7,0.15)',padding:'14px',overflowY:'auto',background:'#111',display:'flex',flexDirection:'column',gap:0}}>
+          <div style=${sectionSt}>
+            <label style=${labelSt}>FILE NAME</label>
+            <div style=${{display:'flex',alignItems:'center',gap:0}}>
+              <input type="text" value=${gifFilename.replace(/\.gif$/i,'')}
+                onInput=${function(e){setGifFilename(e.target.value.slice(0,80));}}
+                placeholder="raccnet"
+                style=${{flex:1,background:'#0f0f0f',border:'1px solid #333',borderRight:'none',color:'#f1f1f1',padding:'5px 8px',fontSize:12,outline:'none',fontFamily:'Roboto,sans-serif',minWidth:0}}
+                onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
+                onBlur=${function(e){e.target.style.borderColor='#333';}}/>
+              <span style=${{background:'#1a1a1a',border:'1px solid rgba(0,255,7,0.4)',color:'var(--accent)',padding:'5px 7px',fontSize:12,flexShrink:0}}>.gif</span>
+            </div>
+          </div>
+          <div style=${sectionSt}>
+            <label style=${labelSt}>OUTPUT WIDTH (px)</label>
+            <${NumInput} value=${gifWidth} onChange=${setGifWidth} min=64 max=1920/>
+          </div>
+          <div style=${{...sectionSt,borderTop:'1px solid rgba(0,255,7,0.12)',paddingTop:12,marginTop:4}}>
+            <div style=${{color:'var(--accent)',fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>CROP</div>
+            <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:4}}>
+              <div><label style=${labelSt}>Left %</label><${NumInput} value=${Math.round(cropLeft*10)/10} onChange=${function(v){setCropLeft(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
+              <div><label style=${labelSt}>Right %</label><${NumInput} value=${Math.round(cropRight*10)/10} onChange=${function(v){setCropRight(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
+              <div><label style=${labelSt}>Top %</label><${NumInput} value=${Math.round(cropTop*10)/10} onChange=${function(v){setCropTop(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
+              <div><label style=${labelSt}>Bottom %</label><${NumInput} value=${Math.round(cropBottom*10)/10} onChange=${function(v){setCropBottom(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
+            </div>
+            <div style=${{fontSize:10,color:'#666',marginTop:2}}>Drag handles on the image to crop</div>
+          </div>
+          <div style=${{...sectionSt,borderTop:'1px solid rgba(0,255,7,0.12)',paddingTop:12,marginTop:4}}>
+            <button onClick=${function(){setAddText(function(v){return !v;});}}
+              style=${{width:'100%',padding:'8px 0',background:addText?'var(--accent)':'var(--accent-solid-dim)',
+                color:addText?'#000':'var(--accent)',border:'1px solid var(--accent)',
+                fontSize:12,fontWeight:700,letterSpacing:1,textTransform:'uppercase',
+                cursor:'pointer',fontFamily:'Roboto,sans-serif',marginBottom:addText?10:0}}
+              onMouseEnter=${function(e){if(!addText){e.currentTarget.style.background='rgba(0,255,7,0.2)';}}}
+              onMouseLeave=${function(e){if(!addText){e.currentTarget.style.background='var(--accent-solid-dim)';}}}
+            >ADD TEXT ABOVE IMAGE</button>
+            ${addText?html`<div>
+              <div style=${sectionSt}>
+                <label style=${labelSt}>TEXT</label>
+                <input type="text" value=${gifText}
+                  onInput=${function(e){setGifText(e.target.value.slice(0,200));}}
+                  placeholder="Enter caption..."
+                  style=${{background:'#111',border:'1px solid #333',color:'#f1f1f1',padding:'6px 10px',fontSize:13,outline:'none',width:'100%',boxSizing:'border-box',fontFamily:'Roboto,sans-serif'}}
+                  onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
+                  onBlur=${function(e){e.target.style.borderColor='#333';}}/>
+              </div>
+              <div style=${sectionSt}>
+                <label style=${labelSt}>TEXT SIZE (px)</label>
+                <${NumInput} value=${textSize} onChange=${setTextSize} min=6 max=120/>
+              </div>
+              <div style=${sectionSt}>
+                <label style=${labelSt}>TEXT THICKNESS (stroke 0–10)</label>
+                <${NumInput} value=${textWeight} onChange=${setTextWeight} min=0 max=10 step=0.5/>
+              </div>
+              <div>
+                <label style=${labelSt}>TEXT BOX HEIGHT (px in gif)</label>
+                <${NumInput} value=${textBoxH} onChange=${setTextBoxH} min=10 max=400/>
+              </div>
+            </div>`:null}
+          </div>
+          <div style=${{marginTop:'auto',paddingTop:14,borderTop:'1px solid rgba(0,255,7,0.2)'}}>
+            ${error?html`<div style=${{color:'#ff5555',fontSize:11,marginBottom:10,padding:'7px 10px',background:'rgba(255,0,0,0.07)',border:'1px solid rgba(255,0,0,0.18)',lineHeight:1.4}}>${error}</div>`:null}
+            <button onClick=${makeGif} disabled=${making}
+              style=${{width:'100%',padding:'10px 0',background:making?'var(--accent-solid-dim)':'var(--accent)',color:making?'var(--accent)':'#000',border:'1px solid var(--accent)',fontSize:13,fontWeight:700,cursor:making?'default':'pointer',letterSpacing:1.5,textTransform:'uppercase',fontFamily:'Roboto,sans-serif'}}
+              onMouseEnter=${function(e){if(!making){e.currentTarget.style.background='#fff';e.currentTarget.style.color='#000';}}}
+              onMouseLeave=${function(e){if(!making){e.currentTarget.style.background='var(--accent)';e.currentTarget.style.color='#000';}}}>
+              ${making?'Making GIF…':'Make GIF'}
+            </button>
+            ${making?html`<div style=${{marginTop:7,fontSize:10,color:'#555',textAlign:'center'}}>Processing with FFmpeg, please wait…</div>`:null}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function GifMakerModal(props) {
   const playlist = props.playlist;
+  const [gifFilename, setGifFilename] = useState('raccnet.gif');
   const [fps, setFps] = useState(15);
   const [gifWidth, setGifWidth] = useState(480);
   const [infoLoaded, setInfoLoaded] = useState(false);
@@ -4240,7 +5135,8 @@ function GifMakerModal(props) {
       var blob = await resp.blob();
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
-      a.href = url; a.download = 'raccnet.gif';
+      var fname = (gifFilename||'raccnet').replace(/\.gif$/i,'').trim()||'raccnet';
+      a.href = url; a.download = fname+'.gif';
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch(e) { setError('Error: ' + e.message); }
@@ -4257,13 +5153,13 @@ function GifMakerModal(props) {
   // Hard pixel dimensions for the crop box — no aspect-ratio, no maxHeight, just fixed w/h.
   var cropBoxW = previewDims ? previewDims.w + 'px' : '100%';
   var cropBoxH = previewDims ? previewDims.h + 'px' : 'auto';
-  var labelSt = {fontSize:11,color:'#888',marginBottom:3,display:'block',letterSpacing:0.5};
+  var labelSt = {fontSize:11,color:'var(--accent)',marginBottom:3,display:'block',letterSpacing:0.5};
   var sectionSt = {marginBottom:14};
 
   return html`<div onClick=${function(e){if(e.target===e.currentTarget)props.onClose();}}
     style=${{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.92)',zIndex:4000,display:'flex',alignItems:'center',justifyContent:'center',padding:'16px',boxSizing:'border-box'}}>
-    <div style=${{background:'#141414',border:'1px solid var(--accent)',width:'100%',maxWidth:960,maxHeight:'95vh',display:'flex',flexDirection:'column',overflow:'hidden',boxShadow:'0 8px 40px rgba(0,0,0,0.8)'}}>
-      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 16px',borderBottom:'1px solid #222',flexShrink:0,background:'#0f0f0f'}}>
+    <div style=${{background:'#141414',border:'1px solid var(--accent)',width:'100%',maxWidth:'min(1300px,96vw)',maxHeight:'97vh',display:'flex',flexDirection:'column',overflow:'hidden',boxShadow:'0 8px 40px rgba(0,0,0,0.8)'}}>
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 16px',borderBottom:'1px solid rgba(0,255,7,0.3)',flexShrink:0,background:'#0f0f0f'}}>
         <span style=${{color:'var(--accent)',fontWeight:700,fontSize:14,letterSpacing:1.5,textTransform:'uppercase'}}>Download as GIF</span>
         <button onClick=${props.onClose}
           style=${{background:'none',border:'1px solid transparent',color:'#aaa',cursor:'pointer',fontSize:18,lineHeight:1,padding:'2px 8px',fontFamily:'Roboto,sans-serif',transition:'color 0.12s, border-color 0.12s'}}
@@ -4305,7 +5201,19 @@ function GifMakerModal(props) {
             </div>
           </div>
         </div>
-        <div style=${{width:230,flexShrink:0,borderLeft:'1px solid #1e1e1e',padding:'14px 14px',overflowY:'auto',background:'#111',display:'flex',flexDirection:'column',gap:0}}>
+        <div style=${{width:280,flexShrink:0,borderLeft:'1px solid rgba(0,255,7,0.15)',padding:'14px 14px',overflowY:'auto',background:'#111',display:'flex',flexDirection:'column',gap:0}}>
+          <div style=${sectionSt}>
+            <label style=${labelSt}>FILE NAME</label>
+            <div style=${{display:'flex',alignItems:'center',gap:0}}>
+              <input type="text" value=${gifFilename.replace(/\.gif$/i,'')}
+                onInput=${function(e){setGifFilename(e.target.value.slice(0,80));}}
+                placeholder="raccnet"
+                style=${{flex:1,background:'#0f0f0f',border:'1px solid #333',borderRight:'none',color:'#f1f1f1',padding:'5px 8px',fontSize:12,outline:'none',fontFamily:'Roboto,sans-serif',minWidth:0}}
+                onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
+                onBlur=${function(e){e.target.style.borderColor='#333';}}/>
+              <span style=${{background:'#1a1a1a',border:'1px solid rgba(0,255,7,0.4)',color:'var(--accent)',padding:'5px 7px',fontSize:12,flexShrink:0}}>.gif</span>
+            </div>
+          </div>
           <div style=${sectionSt}>
             <label style=${labelSt}>FRAME RATE (fps)</label>
             <${NumInput} value=${fps} onChange=${setFps} min=1 max=60/>
@@ -4314,7 +5222,7 @@ function GifMakerModal(props) {
             <label style=${labelSt}>OUTPUT WIDTH (px)</label>
             <${NumInput} value=${gifWidth} onChange=${setGifWidth} min=64 max=1920/>
           </div>
-          <div style=${{...sectionSt,borderTop:'1px solid #1e1e1e',paddingTop:12,marginTop:4}}>
+          <div style=${{...sectionSt,borderTop:'1px solid rgba(0,255,7,0.12)',paddingTop:12,marginTop:4}}>
             <div style=${{color:'var(--accent)',fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>TRIM${vidDuration>0?html` <span style=${{color:'#555',fontWeight:400,fontSize:10}}>/ ${vidDuration}s total</span>`:''}</div>
             <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:4}}>
               <div>
@@ -4334,9 +5242,9 @@ function GifMakerModal(props) {
                 }} min=0 max=9999 step=0.1/>
               </div>
             </div>
-            <div style=${{fontSize:10,color:'#444',marginTop:2}}>End = 0 means use the full video</div>
+            <div style=${{fontSize:10,color:'#666',marginTop:2}}>End = 0 means use the full video</div>
           </div>
-          <div style=${{...sectionSt,borderTop:'1px solid #1e1e1e',paddingTop:12,marginTop:4}}>
+          <div style=${{...sectionSt,borderTop:'1px solid rgba(0,255,7,0.12)',paddingTop:12,marginTop:4}}>
             <div style=${{color:'var(--accent)',fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>CROP</div>
             <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:4}}>
               <div><label style=${labelSt}>Left %</label><${NumInput} value=${Math.round(cropLeft*10)/10} onChange=${function(v){setCropLeft(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
@@ -4344,14 +5252,17 @@ function GifMakerModal(props) {
               <div><label style=${labelSt}>Top %</label><${NumInput} value=${Math.round(cropTop*10)/10} onChange=${function(v){setCropTop(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
               <div><label style=${labelSt}>Bottom %</label><${NumInput} value=${Math.round(cropBottom*10)/10} onChange=${function(v){setCropBottom(Math.max(0,Math.min(49,v)));}} min=0 max=49 step=0.1/></div>
             </div>
-            <div style=${{fontSize:10,color:'#444',marginTop:2}}>Drag handles on the video to crop</div>
+            <div style=${{fontSize:10,color:'#666',marginTop:2}}>Drag handles on the video to crop</div>
           </div>
-          <div style=${{...sectionSt,borderTop:'1px solid #1e1e1e',paddingTop:12,marginTop:4}}>
-            <label style=${{display:'flex',alignItems:'center',gap:8,cursor:'pointer',marginBottom:addText?10:0}}>
-              <input type="checkbox" checked=${addText} onChange=${function(e){setAddText(e.target.checked);}}
-                style=${{accentColor:'var(--accent)',cursor:'pointer',width:14,height:14}}/>
-              <span style=${{fontSize:12,color:addText?'var(--accent)':'#888',fontWeight:addText?700:400,letterSpacing:0.5,transition:'color 0.12s'}}>ADD TEXT ABOVE VIDEO</span>
-            </label>
+          <div style=${{...sectionSt,borderTop:'1px solid rgba(0,255,7,0.12)',paddingTop:12,marginTop:4}}>
+            <button onClick=${function(){setAddText(function(v){return !v;});}}
+              style=${{width:'100%',padding:'8px 0',background:addText?'var(--accent)':'var(--accent-solid-dim)',
+                color:addText?'#000':'var(--accent)',border:'1px solid var(--accent)',
+                fontSize:12,fontWeight:700,letterSpacing:1,textTransform:'uppercase',
+                cursor:'pointer',fontFamily:'Roboto,sans-serif',marginBottom:addText?10:0}}
+              onMouseEnter=${function(e){if(!addText){e.currentTarget.style.background='rgba(0,255,7,0.2)';}}}
+              onMouseLeave=${function(e){if(!addText){e.currentTarget.style.background='var(--accent-solid-dim)';}}}
+            >ADD TEXT ABOVE VIDEO</button>
             ${addText?html`<div>
               <div style=${sectionSt}>
                 <label style=${labelSt}>TEXT</label>
@@ -4376,7 +5287,7 @@ function GifMakerModal(props) {
               </div>
             </div>`:null}
           </div>
-          <div style=${{marginTop:'auto',paddingTop:14,borderTop:'1px solid #1e1e1e'}}>
+          <div style=${{marginTop:'auto',paddingTop:14,borderTop:'1px solid rgba(0,255,7,0.2)'}}>
             ${error?html`<div style=${{color:'#ff5555',fontSize:11,marginBottom:10,padding:'7px 10px',background:'rgba(255,0,0,0.07)',border:'1px solid rgba(255,0,0,0.18)',lineHeight:1.4}}>${error}</div>`:null}
             <button onClick=${makeGif} disabled=${making}
               style=${{width:'100%',padding:'10px 0',background:making?'var(--accent-solid-dim)':'var(--accent)',color:making?'var(--accent)':'#000',border:'1px solid var(--accent)',fontSize:13,fontWeight:700,cursor:making?'default':'pointer',letterSpacing:1.5,textTransform:'uppercase',transition:'background 0.15s,color 0.15s',fontFamily:'Roboto,sans-serif'}}
@@ -4397,14 +5308,21 @@ function WatchPage(props) {
   const sess   = props.session;
   const [thread,  setThread]  = useState(null);
   const [related, setRelated] = useState([]);
+  const [allPartsReplies, setAllPartsReplies] = useState([]);
   const parts        = buildPartsList(thread);
   const isSeries     = parts.length > 1;
   const displayPost  = isSeries ? (parts[0] || post) : post;
   const author = displayPost.author;
   const rec    = displayPost.record;
   const partUris = new Set(parts.slice(1).map(function(p){return p.uri;}));
-  const replies = ((thread && thread.replies) || []).filter(function(r){return r.post && !partUris.has(r.post.uri);}).slice(0,50);
+  const replies = isSeries
+    ? allPartsReplies.slice(0, 50)
+    : ((thread && thread.replies) || []).filter(function(r){return r.post && !partUris.has(r.post.uri);}).slice(0,50);
   const postId  = post.uri.split('/').pop();
+  var commentCount = replies.length;
+  if (!thread) commentCount = post.replyCount || 0;
+  else if (isSeries) commentCount = Math.max(replies.length, Math.max(0, (thread.post&&thread.post.replyCount||0) - (parts.length - 1)));
+  else commentCount = Math.max(replies.length, thread.post&&thread.post.replyCount!=null ? thread.post.replyCount : post.replyCount||0);
 
   // Fetch thread and related videos whenever post changes
   useEffect(function(){
@@ -4445,6 +5363,29 @@ function WatchPage(props) {
       if (r.ok) { const d = await r.json(); setThread(d.thread); }
     } catch(e) {}
   }
+
+  // Load all parts' replies for series posts (Change 9)
+  useEffect(function(){
+    if (!isSeries || parts.length <= 1) return;
+    var cancelled = false;
+    (async function(){
+      var allReplies = [];
+      var seenUris = new Set(parts.map(function(p){return p.uri;}));
+      for (var i = 0; i < parts.length; i++) {
+        try {
+          var r = await api(PUB_PROXY+'/app.bsky.feed.getPostThread?uri='+encodeURIComponent(parts[i].uri)+'&depth=10');
+          if (r.ok && !cancelled) {
+            var d = await r.json();
+            var partReplies = ((d.thread&&d.thread.replies)||[]).filter(function(r){return r.post&&!seenUris.has(r.post.uri);});
+            partReplies.forEach(function(r){if(r.post)seenUris.add(r.post.uri);});
+            allReplies = allReplies.concat(partReplies);
+          }
+        } catch(e){}
+      }
+      if (!cancelled) setAllPartsReplies(allReplies);
+    })();
+    return function(){cancelled=true;};
+  }, [parts.map(function(p){return p.uri;}).join(','), isSeries]);
 
   const [openReplyUri, setOpenReplyUri] = useState(null);
   const [showShare,  setShowShare]  = useState(false);
@@ -4588,6 +5529,15 @@ function WatchPage(props) {
       if(_likedCtxRef.set) _likedCtxRef.set(function(prev){var n=new Set(prev);n.add(displayPost.uri);return n;});
       const uri = await bskyCreate(sess,'app.bsky.feed.like',{'$type':'app.bsky.feed.like',subject:{uri:displayPost.uri,cid:displayPost.cid},createdAt:new Date().toISOString()});
       setLikeUri(uri);
+      // Also like all other series parts
+      if (isSeries && parts.length > 1) {
+        for (var _pi = 1; _pi < parts.length; _pi++) {
+          var _part = parts[_pi];
+          if (_part && _part.uri && _part.cid && !(_part.viewer && _part.viewer.like)) {
+            bskyCreate(sess,'app.bsky.feed.like',{'$type':'app.bsky.feed.like',subject:{uri:_part.uri,cid:_part.cid},createdAt:new Date().toISOString()}).catch(function(){});
+          }
+        }
+      }
     }
   }
   async function toggleRepost() {
@@ -4767,7 +5717,7 @@ function WatchPage(props) {
       <div style=${{overflow:'hidden',background:'#000'}}>
         ${isSeries
           ?html`<${SeriesPlayer} parts=${parts}/>`
-          :html`<${VideoPlayer} playlist=${embed.playlist} thumbnail=${embed.thumbnail} loop=${true}/>`}
+          :html`<${SeriesPlayer} parts=${[post]}/>`}
       </div>
       <h1 style=${{fontSize:18,fontWeight:600,color:'#f1f1f1',margin:'16px 0 8px',lineHeight:1.4}}>
         ${stripPartNum((rec&&rec.text&&rec.text.split('\n')[0])||'Video from Bluesky')}
@@ -4865,7 +5815,7 @@ function WatchPage(props) {
       </div>
       <div style=${{background:'#1a1a1a',border:'1px solid #272727',padding:'12px 16px',marginBottom:24}}>
         <div style=${{fontSize:13,color:'#f1f1f1',fontWeight:500,marginBottom:4}}>
-          ${fmt(likeCount)} likes · ${fmt(dislikeCount)} dislikes · ${fmt((thread&&thread.post&&thread.post.replyCount!=null?thread.post.replyCount:post.replyCount)||0)} comments · ${fmt(repostCount)} reposts · ${ago(post.indexedAt)}
+          ${fmt(likeCount)} likes · ${fmt(dislikeCount)} dislikes · ${fmt(commentCount)} comments · ${fmt(repostCount)} reposts · ${ago(post.indexedAt)}
         </div>
         ${rec&&rec.text?html`<div style=${{fontSize:14,color:'#f1f1f1',marginTop:8,whiteSpace:'pre-wrap',lineHeight:1.6}}>${renderRichText(rec.text,rec.facets,props.onChannel,triggerSearch)}</div>`:null}
         <a href=${'https://bsky.app/profile/'+author.handle+'/post/'+postId} target="_blank" rel="noreferrer"
@@ -4874,7 +5824,7 @@ function WatchPage(props) {
       ${!sess?html`<div style=${{color:'#aaa',fontSize:13,marginBottom:16,padding:'8px 12px',background:'#1a1a1a',border:'1px solid #272727'}}>
         <a onClick=${function(){props.onLogin&&props.onLogin();}} style=${{color:'var(--accent)',cursor:'pointer'}}>Sign in</a> to like, repost, and subscribe.
       </div>`:null}
-      <h3 style=${{color:'#f1f1f1',fontSize:16,fontWeight:600,marginBottom:16}}>${fmt((thread&&thread.post&&thread.post.replyCount!=null?thread.post.replyCount:post.replyCount)||0)} Comments</h3>
+      <h3 style=${{color:'#f1f1f1',fontSize:16,fontWeight:600,marginBottom:16}}>${fmt(commentCount)} Comments</h3>
       <${CommentBox} postUri=${displayPost.uri} postCid=${displayPost.cid} session=${sess} onPosted=${refreshThread}/>
       ${replies.length===0?html`<div style=${{color:'#aaa',fontSize:14}}>No comments yet.</div>`:html`
         <div style=${{position:'relative'}}>
@@ -5652,6 +6602,9 @@ function EditProfileModal(props) {
   const [bannerFile,      setBannerFile]      = useState(null);
   const [bannerUrl,       setBannerUrl]       = useState(d.banner || null);
   const [thoughtsHeading, setThoughtsHeading] = useState(props.thoughtsHeading || '');
+  const [thoughtsHashtag, setThoughtsHashtag] = useState(props.thoughtsHashtag || '');
+  const [customIconUrl,   setLocalCustomIconUrl]   = useState(props.customIconUrl || null);
+  const [customBannerUrl, setLocalCustomBannerUrl] = useState(props.customBannerUrl || null);
   const [saving,          setSaving]          = useState(false);
   const [err,             setErr]             = useState('');
 
@@ -5715,29 +6668,28 @@ function EditProfileModal(props) {
       });
       if (!putRes.ok) throw new Error('Profile update failed: '+(await putRes.text()));
 
-      // Save thoughts heading to raccnet.channel.settings
+      // Save thoughts heading/hashtag to raccnet.channel.settings
+      var settingsRecord = {'$type':'raccnet.channel.settings', thoughtsHeading:thoughtsHeading.trim(),
+        thoughtsHashtag:thoughtsHashtag.trim().replace(/^#/,'').trim()};
       await api(AUTH_PROXY+'/com.atproto.repo.putRecord', {
         method:'POST',
         headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
         body:JSON.stringify({repo:sess.did, collection:'raccnet.channel.settings', rkey:'self',
-          record:{'$type':'raccnet.channel.settings', thoughtsHeading:thoughtsHeading.trim()}})
+          record:settingsRecord})
       });
+      await writeSettingsCache(sess.did, settingsRecord);
 
       props.onSaved({ displayName: displayName.trim(), description: bio.trim(), avatar: avatarUrl, banner: bannerUrl,
-        thoughtsHeading: thoughtsHeading.trim() });
+        thoughtsHeading: thoughtsHeading.trim(), thoughtsHashtag: thoughtsHashtag.trim().replace(/^#/,'').trim() });
     } catch(e) {
       setErr(e.message || 'Save failed');
     }
     setSaving(false);
   }
 
+  const compId = useRef(Math.random().toString(36).slice(2)).current;
   const iSt = {width:'100%',padding:'10px 14px',background:'#121212',border:'1px solid var(--accent)',
     color:'#f1f1f1',fontSize:14,boxSizing:'border-box',borderRadius:0};
-  const fileLabelSt = function(chosen) { return {
-    display:'flex',alignItems:'center',gap:12,padding:'12px 16px',
-    border:'2px dashed '+(chosen?'var(--accent)':'var(--accent)'),cursor:'pointer',
-    background:chosen?'var(--accent-dim-dark)':'#111',transition:'border-color 0.15s'
-  };};
 
   return html`<div onClick=${props.onClose}
     style=${{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.88)',zIndex:2000,
@@ -5753,25 +6705,44 @@ function EditProfileModal(props) {
           onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
           onMouseLeave=${function(e){e.currentTarget.style.opacity='0.7';}}>✕</button>`:null}
       </div>
-      <div style=${{marginBottom:20}}>
-        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Banner Image</label>
-        ${bannerUrl?html`<img src=${bannerUrl} style=${{width:'100%',height:120,objectFit:'cover',display:'block',marginBottom:8,border:'1px solid #272727'}}/>`:null}
-        <label style=${fileLabelSt(!!bannerFile)}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill=${bannerFile?'var(--accent)':'#555'}><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
-          <span style=${{fontSize:13,color:bannerFile?'#f1f1f1':'#888'}}>${bannerFile?bannerFile.name:'Click to choose banner image'}</span>
-          <input type="file" accept="image/*" style=${{display:'none'}} onInput=${onBannerChange} disabled=${saving}/>
-        </label>
-      </div>
-      <div style=${{marginBottom:20}}>
-        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Profile Picture</label>
-        <div style=${{display:'flex',alignItems:'center',gap:16,marginBottom:8}}>
-          ${avatarUrl?html`<img src=${avatarUrl} style=${{width:60,height:60,borderRadius:'50%',objectFit:'cover',border:'2px solid #272727'}}/>`:null}
-          <label style=${Object.assign({},fileLabelSt(!!avatarFile),{flex:1})}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill=${avatarFile?'var(--accent)':'#555'}><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
-            <span style=${{fontSize:13,color:avatarFile?'#f1f1f1':'#888'}}>${avatarFile?avatarFile.name:'Click to choose profile picture'}</span>
-            <input type="file" accept="image/*" style=${{display:'none'}} onInput=${onAvatarChange} disabled=${saving}/>
-          </label>
+      <div style=${{marginBottom:24}}>
+        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:12}}>Icon & Banner</label>
+        <div style=${{display:'flex',gap:12,alignItems:'stretch'}}>
+          <div style=${{flex:'0 0 auto',width:96,cursor:'pointer',position:'relative'}} onClick=${function(){document.getElementById('avatar-input-'+compId).click();}}>
+            <div style=${{width:96,height:96,border:'2px solid var(--accent)',overflow:'hidden',display:'flex',alignItems:'center',justifyContent:'center',background:'#111',position:'relative'}}>
+              ${avatarUrl?html`<img src=${avatarUrl} style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`:html`<svg width="32" height="32" viewBox="0 0 24 24" fill="var(--accent)" opacity="0.4"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>`}
+              <div style=${{position:'absolute',inset:0,background:'rgba(0,255,7,0.08)',display:'flex',alignItems:'center',justifyContent:'center',opacity:0,transition:'opacity 0.15s'}}
+                onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+                onMouseLeave=${function(e){e.currentTarget.style.opacity='0';}}>
+                <span style=${{color:'var(--accent)',fontSize:11,fontWeight:700}}>CHANGE</span>
+              </div>
+            </div>
+            <div style=${{fontSize:11,color:'#555',textAlign:'center',marginTop:4}}>Icon</div>
+            <input id=${'avatar-input-'+compId} type="file" accept="image/*" style=${{display:'none'}} onInput=${onAvatarChange} disabled=${saving}/>
+          </div>
+          <div style=${{flex:1,cursor:'pointer',position:'relative'}} onClick=${function(){document.getElementById('banner-input-'+compId).click();}}>
+            <div style=${{height:96,border:'2px solid var(--accent)',overflow:'hidden',display:'flex',alignItems:'center',justifyContent:'center',background:'#111',position:'relative'}}>
+              ${bannerUrl?html`<img src=${bannerUrl} style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`:html`<svg width="32" height="32" viewBox="0 0 24 24" fill="var(--accent)" opacity="0.4"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>`}
+              <div style=${{position:'absolute',inset:0,background:'rgba(0,255,7,0.08)',display:'flex',alignItems:'center',justifyContent:'center',opacity:0,transition:'opacity 0.15s'}}
+                onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+                onMouseLeave=${function(e){e.currentTarget.style.opacity='0';}}>
+                <span style=${{color:'var(--accent)',fontSize:11,fontWeight:700}}>CHANGE BANNER</span>
+              </div>
+            </div>
+            <div style=${{fontSize:11,color:'#555',textAlign:'center',marginTop:4}}>Banner</div>
+            <input id=${'banner-input-'+compId} type="file" accept="image/*" style=${{display:'none'}} onInput=${onBannerChange} disabled=${saving}/>
+          </div>
         </div>
+        ${(customIconUrl||customBannerUrl)?html`<div style=${{display:'flex',gap:8,marginTop:8}}>
+          ${customIconUrl?html`<button onClick=${async function(e){e.stopPropagation();await clearCustomChannelMedia(sess,'icon');setLocalCustomIconUrl(null);props.onMediaReset&&props.onMediaReset('icon');}}
+            style=${{padding:'4px 10px',background:'none',border:'1px solid #555',color:'#aaa',fontSize:11,cursor:'pointer',borderRadius:0}}>
+            ✕ Reset icon URL
+          </button>`:null}
+          ${customBannerUrl?html`<button onClick=${async function(e){e.stopPropagation();await clearCustomChannelMedia(sess,'banner');setLocalCustomBannerUrl(null);props.onMediaReset&&props.onMediaReset('banner');}}
+            style=${{padding:'4px 10px',background:'none',border:'1px solid #555',color:'#aaa',fontSize:11,cursor:'pointer',borderRadius:0}}>
+            ✕ Reset banner URL
+          </button>`:null}
+        </div>`:null}
       </div>
       <div style=${{marginBottom:16}}>
         <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Display Name</label>
@@ -5785,12 +6756,19 @@ function EditProfileModal(props) {
           style=${Object.assign({},iSt,{resize:'vertical'})} disabled=${saving}/>
         <div style=${{textAlign:'right',fontSize:11,color:'#555',marginTop:3}}>${bio.length}/256</div>
       </div>
-      <div style=${{marginBottom:24}}>
+      <div style=${{marginBottom:8}}>
         <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Thoughts Section Heading</label>
         <input value=${thoughtsHeading} onInput=${function(e){setThoughtsHeading(e.target.value);}} maxlength="80"
           placeholder=${'e.g. '+(d.displayName||d.handle)+"'s Thoughts"}
           style=${iSt} disabled=${saving}/>
         <div style=${{fontSize:11,color:'#555',marginTop:4}}>The label shown above your thoughts box. Leave blank for the default.</div>
+      </div>
+      <div style=${{marginBottom:24}}>
+        <label style=${{display:'block',color:'var(--accent)',fontSize:13,fontWeight:500,marginBottom:8}}>Channel Thoughts Hashtag</label>
+        <input value=${thoughtsHashtag} onInput=${function(e){setThoughtsHashtag(e.target.value.replace(/\s/g,''));}} maxlength="40"
+          placeholder="e.g. myTag (without #)"
+          style=${iSt} disabled=${saving}/>
+        <div style=${{fontSize:11,color:'#555',marginTop:4}}>Only show/post text posts with this hashtag in Channel Thoughts. Leave blank to show all text posts.</div>
       </div>
 
       ${err?html`<div style=${{background:'#1a0000',border:'1px solid #882222',padding:'10px 14px',
@@ -5806,6 +6784,95 @@ function EditProfileModal(props) {
   </div>`;
 }
 
+
+// ── DevConsole — draggable dev overlay showing PDS/cache activity ─────────────
+function DevConsole(props) {
+  var _logs = useState(_devLogs.slice());
+  var logs = _logs[0]; var setLogs = _logs[1];
+  var _pos = useState({x:20,y:80});
+  var pos = _pos[0]; var setPos = _pos[1];
+  var listRef = useRef(null);
+  useEffect(function(){
+    function onEntry(e){ setLogs(function(prev){ var n=prev.concat([e]); return n.length>200?n.slice(n.length-200):n; }); }
+    _devLogListeners.push(onEntry);
+    return function(){ _devLogListeners = _devLogListeners.filter(function(f){return f!==onEntry;}); };
+  },[]);
+  useEffect(function(){
+    if(listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+  },[logs.length]);
+  function onDragStart(e){
+    var sx=e.clientX-pos.x, sy=e.clientY-pos.y;
+    function move(ev){ setPos({x:ev.clientX-sx, y:ev.clientY-sy}); }
+    function up(){ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up); }
+    document.addEventListener('mousemove',move); document.addEventListener('mouseup',up);
+  }
+  var colorMap = {PDS:'#ff9944',CACHE:'var(--accent)',API:'#44aaff'};
+  return html`<div style=${{position:'fixed',left:pos.x+'px',top:pos.y+'px',width:420,maxWidth:'95vw',
+    background:'rgba(10,10,10,0.97)',border:'1px solid var(--accent)',zIndex:99999,
+    display:'flex',flexDirection:'column',boxShadow:'0 4px 24px rgba(0,0,0,0.9)'}}>
+    <div onMouseDown=${onDragStart}
+      style=${{display:'flex',alignItems:'center',justifyContent:'space-between',
+        padding:'6px 12px',background:'var(--accent-solid-dim)',cursor:'move',userSelect:'none'}}>
+      <span style=${{color:'var(--accent)',fontSize:12,fontWeight:700}}>Dev Console</span>
+      <div style=${{display:'flex',gap:8,alignItems:'center'}}>
+        <button onClick=${function(){setLogs([]);_devLogs.length=0;}}
+          style=${{background:'none',border:'1px solid #555',color:'#aaa',fontSize:10,cursor:'pointer',padding:'2px 6px'}}>Clear</button>
+        <button onClick=${props.onClose}
+          style=${{background:'none',border:'none',color:'var(--accent)',fontSize:16,cursor:'pointer',padding:'0 2px'}}>✕</button>
+      </div>
+    </div>
+    <div ref=${listRef} style=${{height:280,overflowY:'auto',padding:'4px 0',fontFamily:'monospace',fontSize:11}}>
+      ${logs.length===0?html`<div style=${{color:'#555',padding:'8px 12px'}}>No activity yet…</div>`:null}
+      ${logs.map(function(l,i){
+        var col=colorMap[l.system]||'#aaa';
+        return html`<div key=${i} style=${{padding:'2px 12px',borderBottom:'1px solid #111',display:'flex',gap:8,alignItems:'flex-start'}}>
+          <span style=${{color:'#555',flexShrink:0,minWidth:60}}>${l.t}</span>
+          <span style=${{color:col,flexShrink:0,minWidth:50,fontWeight:700}}>${l.system}</span>
+          <span style=${{color:'#aaa',flexShrink:0,minWidth:40}}>${l.action}</span>
+          <span style=${{color:'#f1f1f1',wordBreak:'break-all'}}>${l.detail}</span>
+        </div>`;
+      })}
+    </div>
+  </div>`;
+}
+
+// ── ImageViewer — full-screen image lightbox with arrow navigation ────────────
+function ImageViewer(props) {
+  // props.images = array of {thumb, fullsize, alt} objects
+  // props.onClose = function
+  var _idx = useState(props.startIdx||0);
+  var idx = _idx[0]; var setIdx = _idx[1];
+  var images = props.images || [];
+  var img = images[idx];
+  if (!img) return null;
+  function prev(e){e.stopPropagation();setIdx(function(i){return Math.max(0,i-1);});}
+  function next(e){e.stopPropagation();setIdx(function(i){return Math.min(images.length-1,i+1);});}
+  useEffect(function(){
+    function onKey(e){
+      if(e.key==='ArrowLeft') setIdx(function(i){return Math.max(0,i-1);});
+      if(e.key==='ArrowRight') setIdx(function(i){return Math.min(images.length-1,i+1);});
+      if(e.key==='Escape') props.onClose();
+    }
+    document.addEventListener('keydown',onKey);
+    return function(){document.removeEventListener('keydown',onKey);};
+  },[]);
+  return html`<div onClick=${props.onClose}
+    style=${{position:'fixed',inset:0,background:'rgba(0,0,0,0.95)',zIndex:9999,
+      display:'flex',alignItems:'center',justifyContent:'center'}}>
+    <button onClick=${props.onClose}
+      style=${{position:'absolute',top:16,right:20,background:'none',border:'none',color:'var(--accent)',fontSize:28,cursor:'pointer',fontWeight:700,zIndex:1}}>✕</button>
+    ${images.length>1?html`<div style=${{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',color:'var(--accent)',fontSize:13,fontWeight:600}}>${idx+1} / ${images.length}</div>`:null}
+    ${images.length>1&&idx>0?html`<button onClick=${prev}
+      style=${{position:'absolute',left:16,background:'rgba(0,0,0,0.5)',border:'2px solid var(--accent)',color:'var(--accent)',
+        fontSize:24,cursor:'pointer',padding:'8px 14px',fontWeight:700,zIndex:1}}>‹</button>`:null}
+    ${images.length>1&&idx<images.length-1?html`<button onClick=${next}
+      style=${{position:'absolute',right:16,background:'rgba(0,0,0,0.5)',border:'2px solid var(--accent)',color:'var(--accent)',
+        fontSize:24,cursor:'pointer',padding:'8px 14px',fontWeight:700,zIndex:1}}>›</button>`:null}
+    <img src=${img.fullsize||img.thumb} alt=${img.alt||''}
+      onClick=${function(e){e.stopPropagation();}}
+      style=${{maxWidth:'90vw',maxHeight:'90vh',objectFit:'contain',display:'block',userSelect:'none'}}/>
+  </div>`;
+}
 
 // ── PostCard — a single standalone post card used in ChannelPostsFeed ────────
 function PostCard(props) {
@@ -6079,7 +7146,7 @@ function CommentRow(props) {
           onClick=${function(e){e.stopPropagation();setExpandedVid(false);}}
           style=${{position:'fixed',inset:'0',background:'rgba(0,0,0,0.92)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>
           <div style=${{width:'min(860px,92vw)',cursor:'default'}} onClick=${function(e){e.stopPropagation();}}>
-            <${VideoPlayer} playlist=${cVid.playlist} thumbnail=${cVid.thumbnail} loop=${true}/>
+            <${SeriesPlayer} parts=${[{uri:cVid.playlist||'dm-vid',embed:cVid}]}/>
           </div>
         </div>`:null}
         ${cVid&&cVid.playlist?html`<div style=${{marginBottom:8,display:'inline-block'}} onClick=${function(e){e.stopPropagation();}}>
@@ -6152,6 +7219,63 @@ function PostDetailPage(props) {
   const [repostUri,    setRepostUri]    = useState(viewerReposted(post)||null);
   const [repostCount,  setRepostCount]  = useState(post.repostCount||0);
   const [showShare,    setShowShare]    = useState(false);
+  const [showImgGif,   setShowImgGif]   = useState(false);
+  const [plPickerOpen, setPlPickerOpen] = useState(false);
+  const [plPickerLists,setPlPickerLists]= useState(null);
+  const [plPickerLoading,setPlPickerLoading]= useState(false);
+  const [plPickerMsg,  setPlPickerMsg]  = useState('');
+  const [plPickerHov,  setPlPickerHov]  = useState(-1);
+  const [plNewOpen,    setPlNewOpen]    = useState(false);
+  const [plNewName,    setPlNewName]    = useState('');
+  const [plCreating,   setPlCreating]   = useState(false);
+  const [imgIdx,       setImgIdx]       = useState(props.initialImageIdx||0);
+  const [imgLoaded,    setImgLoaded]    = useState(false);
+  const [imgNatW,      setImgNatW]      = useState(0);
+  const [imgNatH,      setImgNatH]      = useState(0);
+  const imgElRef = useRef(null);
+  useEffect(function(){
+    setImgLoaded(false);
+    // If the browser already has this image cached, onLoad won't fire — check after DOM update
+    requestAnimationFrame(function(){
+      var el = imgElRef.current;
+      if (el && el.complete && el.naturalWidth > 0) {
+        setImgLoaded(true);
+        setImgNatW(el.naturalWidth);
+        setImgNatH(el.naturalHeight);
+      }
+    });
+  }, [imgIdx]);
+  // Lightbox state
+  const [lbOpen,  setLbOpen]  = useState(false);
+  const [lbScale, setLbScale] = useState(1);
+  const [lbX,     setLbX]     = useState(0);
+  const [lbY,     setLbY]     = useState(0);
+  const lbDragRef = useRef({on:false,sx:0,sy:0,ox:0,oy:0,moved:false});
+
+  function lbOpen_() { setLbOpen(true); setLbScale(1); setLbX(0); setLbY(0); }
+  function lbClose() { setLbOpen(false); setLbScale(1); setLbX(0); setLbY(0); }
+  function onLbWheel(e) {
+    e.preventDefault();
+    var factor = e.deltaY < 0 ? 1.12 : 0.9;
+    var s_new = Math.max(1, Math.min(10, lbScale * factor));
+    // Zoom relative to cursor: adjust translation so the point under the cursor stays fixed
+    var cx = e.clientX - window.innerWidth / 2;
+    var cy = e.clientY - window.innerHeight / 2;
+    var x_new = s_new <= 1 ? 0 : cx - (cx - lbX) * s_new / lbScale;
+    var y_new = s_new <= 1 ? 0 : cy - (cy - lbY) * s_new / lbScale;
+    setLbScale(s_new); setLbX(x_new); setLbY(y_new);
+  }
+  function onLbMD(e) {
+    e.preventDefault();
+    lbDragRef.current = {on:true,sx:e.clientX,sy:e.clientY,ox:lbX,oy:lbY,moved:false};
+  }
+  function onLbMM(e) {
+    var d=lbDragRef.current; if(!d.on) return;
+    var dx=e.clientX-d.sx, dy=e.clientY-d.sy;
+    if(Math.abs(dx)>3||Math.abs(dy)>3){ d.moved=true; if(lbScale>1.01){setLbX(d.ox+dx);setLbY(d.oy+dy);} }
+  }
+  function onLbMU() { lbDragRef.current.on=false; }
+  function onLbClick() { if(!lbDragRef.current.moved) lbClose(); }
 
   useEffect(function(){ setLocalThread(props.thread||null); }, [props.thread]);
 
@@ -6174,8 +7298,8 @@ function PostDetailPage(props) {
     return function(){cancelled=true;};
   },[post.uri, sess&&sess.accessJwt]);
 
-  const replies = localThread && localThread.replies
-    ? localThread.replies.filter(function(r){return r.post;}).slice(0,50)
+  const replies = localThread
+    ? gatherThreadComments(localThread, author.did).slice(0,50)
     : [];
 
   async function refreshPostThread() {
@@ -6214,6 +7338,70 @@ function PostDetailPage(props) {
     }
   }
 
+  // Close playlist picker on outside click
+  useEffect(function(){
+    if (!plPickerOpen) return;
+    function handler(){ setPlPickerOpen(false); }
+    document.addEventListener('click', handler);
+    return function(){ document.removeEventListener('click', handler); };
+  }, [plPickerOpen]);
+
+  // Load playlists for the Add to Playlist picker
+  useEffect(function(){
+    if (!plPickerOpen || plPickerLists !== null) return;
+    if (!sess) { setPlPickerLists([]); return; }
+    setPlPickerLoading(true);
+    api(AUTH_PROXY+'/app.bsky.graph.getLists?actor='+encodeURIComponent(sess.did)+'&limit=100',
+      {headers:{Authorization:'Bearer '+sess.accessJwt}})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){
+        setPlPickerLists(d ? (d.lists||[]).filter(function(l){return (l.description||'').startsWith('RaccNet Playlist');}) : []);
+        setPlPickerLoading(false);
+      }).catch(function(){ setPlPickerLists([]); setPlPickerLoading(false); });
+  }, [plPickerOpen]);
+
+  async function imgAddToPlaylist(listUri) {
+    if (!sess) return;
+    setPlPickerMsg('Adding…');
+    try {
+      var res = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body: JSON.stringify({repo:sess.did,collection:'raccnet.playlist.item',
+          record:{'$type':'raccnet.playlist.item',postUri:post.uri,postCid:post.cid||'',
+            listUri:listUri,createdAt:new Date().toISOString()}})
+      });
+      if (res.ok) {
+        addToPlaylistLocal(listUri, post);
+        setPlPickerMsg('Added!');
+        setTimeout(function(){ setPlPickerOpen(false); setPlPickerMsg(''); setPlNewOpen(false); setPlNewName(''); }, 900);
+      } else { setPlPickerMsg('Error adding.'); }
+    } catch(e) { setPlPickerMsg('Error adding.'); }
+  }
+
+  async function imgCreateAndAdd() {
+    if (!sess || plCreating) return;
+    var name = plNewName.trim();
+    if (!name) return;
+    setPlCreating(true); setPlPickerMsg('Creating playlist…');
+    try {
+      var r = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+        body: JSON.stringify({repo:sess.did,collection:'app.bsky.graph.list',
+          record:{'$type':'app.bsky.graph.list',purpose:'app.bsky.graph.defs#curatelist',
+            name:name,description:'RaccNet Playlist',createdAt:new Date().toISOString()}})
+      });
+      if (!r.ok) { setPlPickerMsg('Failed to create playlist.'); setPlCreating(false); return; }
+      var d = await r.json();
+      var newPl = {uri:d.uri,name:name,description:'RaccNet Playlist'};
+      setPlPickerLists(function(prev){ return [newPl].concat(prev||[]); });
+      setPlNewOpen(false); setPlNewName('');
+      await imgAddToPlaylist(d.uri);
+    } catch(e) { setPlPickerMsg('Error: '+e.message); }
+    setPlCreating(false);
+  }
+
   // Extract images from embed
   var imgs = null;
   if (embed) {
@@ -6222,46 +7410,92 @@ function PostDetailPage(props) {
     else if ((et==='app.bsky.embed.recordWithMedia#view'||et==='app.bsky.embed.recordWithMedia')
              && embed.media && embed.media.images) imgs = embed.media.images;
   }
+  // Collect all images: traverse full thread tree (same author only) for arrow navigation
+  var allPostImages = localThread
+    ? gatherThreadImgs(localThread, author.did)
+    : (imgs ? imgs.map(function(im){ return {src:im.fullsize||im.thumb, alt:im.alt||''}; }) : []);
+  // Total count: use threadImgCount prop if provided (from PostImageGrid's deep fetch), else length
+  var totalImgCount = props.threadImgCount != null ? props.threadImgCount : allPostImages.length;
+  var safeIdx = Math.min(imgIdx, Math.max(0, allPostImages.length-1));
 
   const bSt = function(active) { return {background:'var(--accent-solid-dim)',border:'1px solid '+(active?'var(--accent)':'#333'),color:'var(--accent)',padding:'8px 14px',borderRadius:0,fontSize:13,display:'flex',alignItems:'center',gap:6,cursor:sess?'pointer':'default',transition:'background 0.15s, color 0.15s'}; };
   const bHover = function(active){return function(e){if(!active){e.currentTarget.style.background='var(--accent)';e.currentTarget.style.color='#000';}};};
   const bLeave = function(e,active){e.currentTarget.style.background='var(--accent-solid-dim)';e.currentTarget.style.color='var(--accent)';e.currentTarget.style.borderColor=active?'var(--accent)':'#333';};
   const bClick = function(e){e.currentTarget.style.background='var(--accent-solid-dim)';e.currentTarget.style.color='var(--accent)';e.currentTarget.style.borderColor='';};
 
-  return html`<div style=${{padding:16}}>
+  return html`<div style=${{display:'flex',flexDirection:'column',height:'calc(100vh - 56px)',overflow:'hidden'}}>
     ${showShare?html`<${ShareModal} post=${post} session=${sess} onClose=${function(){setShowShare(false);}}/>`  :null}
-    <button onClick=${props.onBack}
-      style=${{background:'none',border:'1px solid #3f3f3f',color:'#f1f1f1',padding:'7px 16px',
-        marginBottom:16,cursor:'pointer',fontSize:13,display:'flex',alignItems:'center',gap:6,borderRadius:0}}
-      onMouseEnter=${function(e){e.currentTarget.style.background='#272727';}}
-      onMouseLeave=${function(e){e.currentTarget.style.background='none';}}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
-      Back
-    </button>
-    <div style=${{display:'flex',gap:24,alignItems:'flex-start',maxWidth:1400,margin:'0 auto'}}>
-      <div style=${{flex:'0 0 60%',minWidth:0,background:'#141414',border:'1px solid #222',padding:28}}>
-        <div style=${{display:'flex',alignItems:'center',gap:14,marginBottom:18}}>
-          <div style=${{display:'flex',alignItems:'center',gap:14,flex:1,cursor:'pointer'}} onClick=${function(){props.onChannel(author.handle);}}>
-            <${Avatar} src=${author.avatar} size=${56}/>
-            <div style=${{flex:1}}>
-              <div style=${{color:'#f1f1f1',fontWeight:700,fontSize:18}}>${author.displayName||author.handle}</div>
-              <div style=${{color:'#555',fontSize:13}}>@${author.handle} · ${ago(post.indexedAt)}</div>
-            </div>
-          </div>
-          ${sess&&sess.did!==author.did?html`<div onClick=${function(e){e.stopPropagation();}}><${SubscribeButton} did=${author.did} viewer=${author.viewer} session=${sess}/></div>`:null}
+    ${showImgGif&&allPostImages[safeIdx]?html`<${ImageGifMakerModal}
+      imageUrl=${allPostImages[safeIdx].src}
+      natW=${imgNatW||0} natH=${imgNatH||0}
+      onClose=${function(){setShowImgGif(false);}}/>`  :null}
+    ${lbOpen?html`<div
+      style=${{position:'fixed',inset:0,background:'rgba(0,0,0,0.97)',zIndex:10000,display:'flex',
+        alignItems:'center',justifyContent:'center',overflow:'hidden',
+        cursor:lbScale>1.01?(lbDragRef.current.on?'grabbing':'grab'):'zoom-out'}}
+      onWheel=${onLbWheel}
+      onMouseDown=${onLbMD} onMouseMove=${onLbMM} onMouseUp=${onLbMU} onMouseLeave=${onLbMU}
+      onClick=${onLbClick}>
+      <img src=${allPostImages[safeIdx]&&allPostImages[safeIdx].src} alt=""
+        style=${{
+          transform:'translate('+lbX+'px,'+lbY+'px) scale('+lbScale+')',
+          transformOrigin:'50% 50%',maxWidth:'100vw',maxHeight:'100vh',
+          objectFit:'contain',userSelect:'none',pointerEvents:'none',display:'block'
+        }}/>
+      <div style=${{position:'absolute',bottom:16,left:'50%',transform:'translateX(-50%)',
+        color:'#555',fontSize:11,pointerEvents:'none',background:'rgba(0,0,0,0.5)',padding:'2px 10px'}}>
+        Click to close · Scroll to zoom · Drag to pan when zoomed
+      </div>
+    </div>`:null}
+    <div style=${{flexShrink:0,padding:'10px 16px',borderBottom:'1px solid #1e1e1e',background:'#0f0f0f',display:'flex',alignItems:'center',gap:12}}>
+      <button onClick=${props.onBack}
+        style=${{background:'none',border:'1px solid #3f3f3f',color:'#f1f1f1',padding:'6px 14px',
+          cursor:'pointer',fontSize:13,display:'flex',alignItems:'center',gap:6,borderRadius:0,flexShrink:0}}
+        onMouseEnter=${function(e){e.currentTarget.style.background='#272727';}}
+        onMouseLeave=${function(e){e.currentTarget.style.background='none';}}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+        Back
+      </button>
+      <div style=${{display:'flex',alignItems:'center',gap:10,cursor:'pointer',minWidth:0,flex:1}} onClick=${function(){props.onChannel&&props.onChannel(author.handle);}}>
+        <${Avatar} src=${author.avatar} size=${32}/>
+        <div style=${{minWidth:0}}>
+          <span style=${{color:'#f1f1f1',fontWeight:700,fontSize:14}}>${author.displayName||author.handle}</span>
+          <span style=${{color:'#555',fontSize:12,marginLeft:8}}>@${author.handle} · ${ago(post.indexedAt)}</span>
         </div>
-        ${rec.text?html`<div style=${{fontSize:17,color:'#e0e0e0',lineHeight:1.75,
-          whiteSpace:'pre-wrap',marginBottom:20,wordBreak:'break-word'}}>${renderRichText(rec.text,rec.facets,props.onChannel,triggerSearch)}</div>`:null}
-        ${imgs&&imgs.length?html`<div style=${{display:'grid',
-          gridTemplateColumns:imgs.length===1?'1fr':imgs.length===2?'1fr 1fr':'1fr 1fr',
-          gap:4,marginBottom:20}}>
-          ${imgs.map(function(img,ii){return html`<img key=${ii}
-            src=${img.fullsize||img.thumb} alt=${img.alt||''}
-            style=${{width:'100%',aspectRatio:imgs.length===1?'auto':'1/1',
-              maxHeight:600,objectFit:'contain',display:'block',background:'#0a0a0a'}}
-          />`;}) }
+      </div>
+      ${sess&&sess.did!==author.did?html`<div onClick=${function(e){e.stopPropagation();}} style=${{flexShrink:0}}><${SubscribeButton} did=${author.did} viewer=${author.viewer} session=${sess}/></div>`:null}
+    </div>
+    <div style=${{flex:1,minHeight:0,display:'flex',overflow:'hidden'}}>
+      <div style=${{flex:1,minWidth:0,overflow:'hidden',background:'#141414',display:'flex',flexDirection:'column'}}>
+        ${rec.text?html`<div style=${{fontSize:15,color:'#e0e0e0',lineHeight:1.7,
+          whiteSpace:'pre-wrap',padding:'14px 16px 0',wordBreak:'break-word',
+          flexShrink:0,maxHeight:'22%',overflowY:'auto'}}>${renderRichText(rec.text,rec.facets,props.onChannel,triggerSearch)}</div>`:null}
+        ${allPostImages.length>0?html`<div style=${{position:'relative',flex:1,minHeight:0,background:'#0a0a0a',userSelect:'none',display:'flex',alignItems:'center',justifyContent:'center',cursor:'zoom-in'}}
+          onClick=${function(){ lbOpen_(); }}>
+          ${totalImgCount>1?html`<div style=${{position:'absolute',top:8,left:'50%',transform:'translateX(-50%)',
+            background:'rgba(0,0,0,0.7)',color:'var(--accent)',fontSize:11,padding:'2px 8px',fontWeight:600,zIndex:2,pointerEvents:'none'}}>
+            ${safeIdx+1} / ${totalImgCount}
+          </div>`:null}
+          ${!imgLoaded?html`<div style=${{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',zIndex:1,pointerEvents:'none'}}>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="var(--accent)" style=${{animation:'spin 1s linear infinite'}}>
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
+            </svg>
+          </div>`:null}
+          <img ref=${imgElRef} src=${allPostImages[safeIdx].src} alt=${allPostImages[safeIdx].alt}
+            onLoad=${function(e){ setImgLoaded(true); setImgNatW(e.target.naturalWidth); setImgNatH(e.target.naturalHeight); }}
+            style=${{maxWidth:'100%',maxHeight:'100%',objectFit:'contain',display:'block',opacity:imgLoaded?1:0,transition:'opacity 0.15s'}}/>
+          ${allPostImages.length>1&&safeIdx>0?html`<button
+            onClick=${function(e){e.stopPropagation();setImgIdx(function(i){return Math.max(0,i-1);});}}
+            style=${{position:'absolute',left:8,top:'50%',transform:'translateY(-50%)',
+              background:'rgba(0,0,0,0.6)',border:'2px solid var(--accent)',color:'var(--accent)',
+              fontSize:22,cursor:'pointer',padding:'6px 12px',fontWeight:700,zIndex:2,lineHeight:1}}>‹</button>`:null}
+          ${allPostImages.length>1&&safeIdx<allPostImages.length-1?html`<button
+            onClick=${function(e){e.stopPropagation();setImgIdx(function(i){return Math.min(allPostImages.length-1,i+1);});}}
+            style=${{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)',
+              background:'rgba(0,0,0,0.6)',border:'2px solid var(--accent)',color:'var(--accent)',
+              fontSize:22,cursor:'pointer',padding:'6px 12px',fontWeight:700,zIndex:2,lineHeight:1}}>›</button>`:null}
         </div>`:null}
-        <div style=${{display:'flex',gap:8,flexWrap:'wrap',paddingTop:16,borderTop:'1px solid #1e1e1e'}}>
+        <div style=${{flexShrink:0,display:'flex',gap:6,flexWrap:'wrap',padding:'12px 16px',borderTop:'1px solid #1e1e1e',position:'relative'}}>
           <button onClick=${function(e){bClick(e);toggleLike();}} style=${bSt(liked)} onMouseEnter=${bHover(liked)} onMouseLeave=${function(e){bLeave(e,liked);}}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>
             ${fmt(likeCount)}
@@ -6274,25 +7508,91 @@ function PostDetailPage(props) {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
             ${fmt(repostCount)}
           </button>
-          <button style=${bSt(false)} onMouseEnter=${bHover(false)} onMouseLeave=${function(e){bLeave(e,false);}}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M21.99 4c0-1.1-.89-2-1.99-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4-.01-18z"/></svg>
-            ${fmt(post.replyCount||0)}
-          </button>
+          ${allPostImages.length>0&&allPostImages[safeIdx]?html`<a
+            href=${'/proxy-download?url='+encodeURIComponent(allPostImages[safeIdx].src)+'&filename=raccnet_image.jpg'}
+            onClick=${function(e){e.stopPropagation();}}
+            style=${{...bSt(false),textDecoration:'none',display:'flex',alignItems:'center',gap:6}}
+            onMouseEnter=${bHover(false)} onMouseLeave=${function(e){bLeave(e,false);}}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+            Download
+          </a>`:null}
+          ${allPostImages.length>0?html`<button onClick=${function(e){bClick(e);setShowImgGif(true);}} style=${bSt(false)} onMouseEnter=${bHover(false)} onMouseLeave=${function(e){bLeave(e,false);}}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
+            Download as GIF
+          </button>`:null}
+          ${sess?html`<div style=${{position:'relative'}}>
+            <button onClick=${function(e){e.stopPropagation();setPlPickerOpen(function(o){return !o;});if(!plPickerOpen){setPlPickerLists(null);setPlPickerMsg('');}}} style=${bSt(plPickerOpen)} onMouseEnter=${bHover(plPickerOpen)} onMouseLeave=${function(e){bLeave(e,plPickerOpen);}}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm1 9h-4v4h-2v-4H11V9h4V5h2v4h4v2z"/></svg>
+              Add to Playlist
+            </button>
+            ${plPickerOpen?html`<div onClick=${function(e){e.stopPropagation();}}
+              style=${{position:'absolute',bottom:'calc(100% + 4px)',left:0,background:'#1a1a1a',
+                border:'1px solid var(--accent)',minWidth:200,zIndex:500,boxShadow:'0 4px 20px rgba(0,0,0,0.7)',maxHeight:280,overflowY:'auto'}}>
+              ${plPickerMsg?html`<div style=${{padding:'8px 14px',color:'var(--accent)',fontSize:13}}>${plPickerMsg}</div>`:null}
+              ${plPickerLoading?html`<div style=${{padding:'8px 14px',color:'#555',fontSize:13}}>Loading…</div>`:null}
+              ${!plPickerLoading&&plPickerLists&&plPickerLists.length===0?html`<div style=${{padding:'8px 14px',color:'#555',fontSize:13}}>No playlists found. Create one first.</div>`:null}
+              ${(plPickerLists||[]).map(function(pl,i){return html`<button key=${pl.uri}
+                style=${{display:'block',width:'100%',padding:'9px 14px',
+                  background:plPickerHov===i?'var(--accent-dim)':'none',
+                  border:'none',borderLeft:plPickerHov===i?'2px solid var(--accent)':'2px solid transparent',
+                  color:plPickerHov===i?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',
+                  textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s,color 0.1s'}}
+                onMouseEnter=${function(){setPlPickerHov(i);}}
+                onMouseLeave=${function(){setPlPickerHov(-1);}}
+                onClick=${function(){imgAddToPlaylist(pl.uri);}}>
+                ${pl.name||'Unnamed Playlist'}
+              </button>`;})}
+              <div style=${{borderTop:'1px solid #2a2a2a',padding:'8px 10px'}}>
+                ${!plNewOpen?html`<button
+                  onClick=${function(){setPlNewOpen(true);setPlNewName('');}}
+                  style=${{display:'block',width:'100%',padding:'7px 4px',background:'none',border:'none',
+                    color:'var(--accent)',fontSize:13,cursor:'pointer',textAlign:'left',
+                    fontFamily:'Roboto,sans-serif',opacity:0.85}}
+                  onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
+                  onMouseLeave=${function(e){e.currentTarget.style.opacity='0.85';}}>
+                  + New Playlist
+                </button>`:html`<div>
+                  <input type="text" value=${plNewName}
+                    onInput=${function(e){setPlNewName(e.target.value.slice(0,64));}}
+                    placeholder="Playlist name…"
+                    style=${{width:'100%',boxSizing:'border-box',background:'#0f0f0f',border:'1px solid #444',
+                      color:'#f1f1f1',padding:'5px 8px',fontSize:12,outline:'none',
+                      fontFamily:'Roboto,sans-serif'}}
+                    onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
+                    onBlur=${function(e){e.target.style.borderColor='#444';}}/>
+                  <div style=${{display:'flex',gap:6,marginTop:6}}>
+                    <button onClick=${function(){setPlNewOpen(false);setPlNewName('');}}
+                      style=${{flex:1,padding:'5px 0',background:'#222',border:'1px solid #444',
+                        color:'#aaa',fontSize:12,cursor:'pointer',fontFamily:'Roboto,sans-serif'}}>
+                      Cancel
+                    </button>
+                    <button onClick=${imgCreateAndAdd} disabled=${plCreating||!plNewName.trim()}
+                      style=${{flex:2,padding:'5px 0',background:plCreating||!plNewName.trim()?'#1a2e1a':'var(--accent-solid-dim)',
+                        border:'1px solid var(--accent)',color:'var(--accent)',fontSize:12,
+                        cursor:plCreating||!plNewName.trim()?'not-allowed':'pointer',fontFamily:'Roboto,sans-serif',
+                        opacity:plCreating||!plNewName.trim()?0.5:1}}>
+                      ${plCreating?'Creating…':'Create & Add'}
+                    </button>
+                  </div>
+                </div>`}
+              </div>
+            </div>`:null}
+          </div>`:null}
           <button onClick=${function(e){bClick(e);setShowShare(true);}} style=${bSt(false)} title="Share via DM" onMouseEnter=${bHover(false)} onMouseLeave=${function(e){bLeave(e,false);}}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
             Share
           </button>
         </div>
       </div>
-      <div style=${{flex:'0 0 38%',minWidth:0,maxHeight:'85vh',overflowY:'auto',
-        background:'#111',border:'1px solid #1e1e1e',padding:20}}>
-        <h3 style=${{color:'#f1f1f1',fontSize:15,fontWeight:600,marginBottom:16,
-          paddingBottom:10,borderBottom:'1px solid #1e1e1e'}}>
-          ${fmt(post.replyCount||0)} Replies
+      <div style=${{flex:'0 0 300px',minWidth:0,overflowY:'auto',height:'100%',boxSizing:'border-box',
+        background:'#111',borderLeft:'1px solid #1e1e1e',padding:16}}>
+        <h3 style=${{color:'#f1f1f1',fontSize:14,fontWeight:600,marginBottom:12,
+          paddingBottom:8,borderBottom:'1px solid #1e1e1e'}}>
+          ${fmt(post.replyCount||0)} Comments
         </h3>
         <${CommentBox} postUri=${post.uri} postCid=${post.cid} session=${sess} onPosted=${refreshPostThread}/>
         ${!localThread?html`<div style=${{color:'#555',fontSize:13,textAlign:'center',paddingTop:24}}>Loading…</div>`:
-          replies.length===0?html`<div style=${{color:'#555',fontSize:14}}>No replies yet.</div>`:
+          replies.length===0?html`<div style=${{color:'#555',fontSize:14}}>No comments yet.</div>`:
           replies.map(function(r,i){
             return html`<${CommentRow} key=${i} post=${r.post} replies=${r.replies||[]} depth=${0}
               rootUri=${post.uri} rootCid=${post.cid}
@@ -6304,6 +7604,31 @@ function PostDetailPage(props) {
 
     </div>
   </div>`;
+}
+
+// ── ImageDetailPage — full-screen image detail layer (opened from PostImageGrid) ──
+function ImageDetailPage(props) {
+  var post = props.post;
+  const [thread, setThread] = useState(null);
+
+  useEffect(function(){
+    if (!post || !post.uri) return;
+    setThread(null);
+    var cancelled = false;
+    api(PUB_PROXY+'/app.bsky.feed.getPostThread?uri='+encodeURIComponent(post.uri)+'&depth=100')
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){ if (d && !cancelled) setThread(d.thread); })
+      .catch(function(){});
+    return function(){ cancelled = true; };
+  }, [post && post.uri]);
+
+  return html`<${PostDetailPage}
+    item=${{post: post}}
+    thread=${thread}
+    session=${props.session}
+    onBack=${props.onBack}
+    onChannel=${props.onChannel}
+    onWatch=${props.onWatch}/>`;
 }
 
 // ── ChannelPostsFeed ─────────────────────────────────────────────────────────
@@ -6442,21 +7767,54 @@ function ChannelPostsFeed(props) {
 
 // ── LikedTab — Videos and Posts the user has liked ───────────────────────────
 function LikedTab(props) {
-  const [sub, setSub] = useState('Liked Posts');
-  if(props.loading) return html`<div style=${{padding:'32px 0',textAlign:'center',color:'#aaa'}}>Loading liked content…</div>`;
-  if(!props.posts||!props.posts.length) return html`<div style=${{padding:'32px 0',textAlign:'center',color:'#aaa'}}>No liked content found.</div>`;
-  const tabSt = function(a){ return {
-    padding:'10px 20px',background:'none',border:'none',cursor:'pointer',fontSize:14,
-    color:a?'var(--accent)':'#aaa',fontWeight:a?500:400,
-    borderBottom:'3px solid '+(a?'var(--accent)':'transparent')
-  };};
+  const portrait   = usePortrait();
+  const [contentSub,  setContentSub]  = useState(function(){return loadContentSub();});
+  useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
+  const [sortOrder,   setSortOrder]   = useState('Newest');
+  const [timeRange,   setTimeRange]   = useState('All Time');
+  const [hideLiked,   setHideLiked]   = useState(false);
+  const [contentFilter,setContentFilter] = useState(loadFilter());
+  const [hideHistory, setHideHistory] = useState(false);
+  const [gridSizeTick,setGridSizeTick]= useState(0);
+  const sentinelRef = useRef(null);
+  const gridOrient = portrait?'portrait':'landscape';
+  const gridMode   = contentSub==='Images'?'images':'videos';
+  const imgCols    = loadGridSize('images', gridOrient);
+  const vidCols    = loadGridSize('videos', gridOrient);
+  const btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
+
+  // Scroll sentinel — triggers load more for all modes
+  useEffect(function(){
+    var el = sentinelRef.current;
+    if (!el || !props.hasMore) return;
+    var obs = new IntersectionObserver(function(entries){
+      if (entries[0].isIntersecting && props.onLoadMore) props.onLoadMore();
+    }, {rootMargin:'400px'});
+    obs.observe(el);
+    return function(){ obs.disconnect(); };
+  }, [props.hasMore, props.onLoadMore, contentSub]);
+
   return html`<div>
-    <div style=${{display:'flex',justifyContent:'flex-end',borderBottom:'1px solid #272727',marginBottom:20}}>
-      <button style=${tabSt(sub==='Liked Videos')} onClick=${function(){setSub('Liked Videos');}}>Liked Videos (${(props.videos||[]).length})</button>
-      <button style=${tabSt(sub==='Liked Posts')}  onClick=${function(){setSub('Liked Posts');}}>Liked Posts (${(props.posts||[]).length})</button>
+    <div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:4,flexWrap:'wrap',marginBottom:16}}>
+      <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?gridMode:null} gridOrient=${gridOrient} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
+      ${['Hybrid','Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){setContentSub(s);}} style=${btnSt(contentSub===s)}>${s}</button>`;})}
     </div>
-    ${sub==='Liked Videos'?html`<${VideoGrid} videos=${props.videos||[]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
-    ${sub==='Liked Posts'?html`<${ChannelPostsFeed} posts=${props.posts||[]} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true}/>`:null}
+    ${props.loading?html`<div style=${{padding:'32px 0',textAlign:'center',color:'#aaa'}}>Loading liked content…</div>`:null}
+    ${!props.loading&&contentSub==='Videos'?html`<${VideoGrid} videos=${props.videos||[]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} setHideHistory=${setHideHistory} hasMoreFromAPI=${props.hasMore} onLoadMoreAPI=${props.onLoadMore} gridCols=${vidCols} _tick=${gridSizeTick}/>`:null}
+    ${!props.loading&&contentSub==='Images'?html`<${PostImageGrid} items=${props.posts||[]} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`:null}
+    ${!props.loading&&contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${props.posts||[]} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
+    ${!props.loading&&contentSub==='Hybrid'?html`<div>${(function(){
+      var vidItems=(props.videos||[]).map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
+      var postItems=(props.posts||[]).filter(function(x){var p=x.post||x;return !isVid(p)&&!isVidRaw(p);}).map(function(x){return {type:'post',item:x,date:new Date(((x.post||x).indexedAt||(x.post||x).record&&(x.post||x).record.createdAt||0)).getTime()};});
+      var combined=vidItems.concat(postItems).sort(function(a,b){return b.date-a.date;});
+      if(!combined.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No liked content.</div>`;
+      return html`<div>${combined.map(function(x,i){
+        if(x.type==='vid') return html`<${VideoGrid} key=${'v'+i} videos=${[x.post]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
+        return html`<${PostCard} key=${'p'+i} item=${x.item} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
+      })}</div>`;
+    })()}</div>`:null}
+    ${props.hasMore?html`<div ref=${sentinelRef} style=${{height:1}}/>`:null}
+    ${props.loadingMore?html`<${RaccNetLoadingIndicator} label="Loading more"/>`:null}
   </div>`;
 }
 
@@ -6829,6 +8187,8 @@ function SharePlaylistModal(props) {
 function PlaylistsTab(props) {
   const portrait = usePortrait();
   const mobileCols = loadMobileCols();
+  const [contentSub, setContentSub] = useState(function(){return loadContentSub();});
+  useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
   const [plSort, setPlSort] = useState('default'); // 'default' | 'name' | 'count'
   const playlists = (function(){
     var arr = (props.playlists || []).slice();
@@ -6844,6 +8204,7 @@ function PlaylistsTab(props) {
   const [plMenuOpen, setPlMenuOpen] = useState(-1);
   const [plMenuPos, setPlMenuPos] = useState(null);
   const [plMenuHov, setPlMenuHov] = useState('');
+  const plMenuActionTaken = useRef(false);
   // Close playlist menu on outside click
   useEffect(function() {
     if (plMenuOpen < 0) return;
@@ -6987,12 +8348,31 @@ function PlaylistsTab(props) {
           </div>
         </div>
       </div>
+      <div style=${{display:'flex',gap:4,alignItems:'center',marginTop:8,marginBottom:4}}>
+        ${['Hybrid','Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){setContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:contentSub===s?'var(--accent)':'none',color:contentSub===s?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>${s}</button>`;})}
+      </div>
       ${props.playlistVidsLoading?html`<div style=${{color:'#aaa',padding:20}}>Loading videos…</div>`:
         !props.playlistVids||!props.playlistVids.length?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'30vh',gap:12,color:'#aaa'}}>
           <svg width="48" height="48" viewBox="0 0 24 24" fill="#3f3f3f"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
-          <p style=${{fontSize:14}}>No videos in this playlist yet.</p>
+          <p style=${{fontSize:14}}>No items in this playlist yet.</p>
         </div>`:
-        html`<${VideoGrid} videos=${props.playlistVids} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} onRemovedFromPlaylist=${props.onRemovedFromPlaylist} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null}/>`}
+        html`<div>
+          ${(function(){
+            var plVids = props.playlistVids||[];
+            var imgCols = loadGridSize('images', portrait?'portrait':'landscape');
+            var imgItems = plVids.map(function(x){return {post:(x.post||x)};});
+            if (contentSub==='Videos') return html`<${VideoGrid} videos=${plVids} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} onRemovedFromPlaylist=${props.onRemovedFromPlaylist} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null}/>`;
+            if (contentSub==='Images') return html`<${PostImageGrid} items=${imgItems} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`;
+            if (contentSub==='Timeline') return html`<${ChannelPostsFeed} posts=${imgItems} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true}/>`;
+            // Hybrid
+            var vidPosts = plVids.filter(function(x){return isVid(x.post||x);});
+            var imgPosts = imgItems.filter(function(x){return getPostImages(x.post).length>0;});
+            return html`<div>
+              ${vidPosts.length>0?html`<${VideoGrid} videos=${vidPosts} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} onRemovedFromPlaylist=${props.onRemovedFromPlaylist} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null}/>`:null}
+              ${imgPosts.length>0?html`<div style=${{marginTop:24}}><${PostImageGrid} items=${imgPosts} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/></div>`:null}
+            </div>`;
+          })()}
+        </div>`}
     </div>`;
   }
 
@@ -7036,7 +8416,6 @@ function PlaylistsTab(props) {
     </div>
     <div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat(auto-fill,minmax(280px,1fr))',gap:portrait?'16px 8px':'24px 16px'}}>
     ${playlists.map(function(pl,i){
-      var vidCount=getPlaylistLocalItems(pl.uri).length||(pl.listItemCount||0);
       var cleanDesc=(pl.description||'').replace(/^RaccNet Playlist\n?/,'').trim();
       return html`<div key=${pl.uri}
         style=${{display:'flex',cursor:'pointer',background:'#1a1a1a',
@@ -7044,15 +8423,11 @@ function PlaylistsTab(props) {
           transition:'border-color 0.15s',overflow:'hidden',position:'relative',minHeight:100}}
         onMouseEnter=${function(){setPlHov(i);}}
         onMouseLeave=${function(){setPlHov(-1);}}
-        onClick=${function(){if(plMenuOpen===i)return;props.onOpenPlaylist(pl);}}>
+        onClick=${function(){if(plMenuActionTaken.current){plMenuActionTaken.current=false;return;}if(plMenuOpen===i)return;props.onOpenPlaylist(pl);}}>
         <div style=${{width:'42%',flexShrink:0,background:'#0a0a0a',display:'flex',alignItems:'center',justifyContent:'center',position:'relative',overflow:'hidden'}}>
           ${pl.avatar
             ? html`<img src=${pl.avatar} style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`
             : html`<svg width="44" height="44" viewBox="0 0 24 24" fill=${plHov===i?'var(--accent)':'#3f3f3f'} style=${{transition:'fill 0.15s'}}><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 9H9V9h10v2zm-4 4H9v-2h6v2zm4-8H9V5h10v2z"/></svg>`}
-          <div style=${{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',color:'#ccc',fontSize:10,padding:'2px 5px',display:'flex',alignItems:'center',gap:3}}>
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 9H9V9h10v2zm-4 4H9v-2h6v2zm4-8H9V5h10v2z"/></svg>
-            ${vidCount} ${vidCount===1?'video':'videos'}
-          </div>
         </div>
         <div style=${{flex:1,minWidth:0,display:'flex',flexDirection:'column',justifyContent:'space-between',padding:'10px 10px 10px 12px'}}>
           <div>
@@ -7084,7 +8459,7 @@ function PlaylistsTab(props) {
                     textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
                   onMouseEnter=${function(){setPlMenuHov('addtab_'+i);}}
                   onMouseLeave=${function(){setPlMenuHov('');}}
-                  onClick=${function(e){e.stopPropagation();props.onAddToChannelTabs(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
+                  onClick=${function(e){e.stopPropagation();plMenuActionTaken.current=true;props.onAddToChannelTabs(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
                   Add to Channel Tabs
                 </button>`:null}
                 <button
@@ -7093,7 +8468,7 @@ function PlaylistsTab(props) {
                     textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
                   onMouseEnter=${function(){setPlMenuHov('share_'+i);}}
                   onMouseLeave=${function(){setPlMenuHov('');}}
-                  onClick=${function(e){e.stopPropagation();setSharePlaylist(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
+                  onClick=${function(e){e.stopPropagation();plMenuActionTaken.current=true;setSharePlaylist(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
                   Share
                 </button>
                 ${props.isOwner?html`<button
@@ -7102,7 +8477,7 @@ function PlaylistsTab(props) {
                     textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
                   onMouseEnter=${function(){setPlMenuHov('edit_'+i);}}
                   onMouseLeave=${function(){setPlMenuHov('');}}
-                  onClick=${function(e){e.stopPropagation();setEditName(pl.name||'');setEditDesc((pl.description||'').replace(/^RaccNet Playlist\n?/,'').trim());setEditErr('');setEditingPlaylist(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
+                  onClick=${function(e){e.stopPropagation();plMenuActionTaken.current=true;setEditName(pl.name||'');setEditDesc((pl.description||'').replace(/^RaccNet Playlist\n?/,'').trim());setEditErr('');setEditingPlaylist(pl);setPlMenuOpen(-1);setPlMenuPos(null);}}>
                   Edit Playlist
                 </button>`:null}
                 ${props.isOwner?html`<button
@@ -7111,7 +8486,7 @@ function PlaylistsTab(props) {
                     textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s'}}
                   onMouseEnter=${function(){setPlMenuHov('del_'+i);}}
                   onMouseLeave=${function(){setPlMenuHov('');}}
-                  onClick=${function(e){e.stopPropagation();deletePlaylist(pl);}}>
+                  onClick=${function(e){e.stopPropagation();plMenuActionTaken.current=true;deletePlaylist(pl);}}>
                   ${plDeleting?'Deleting…':'Delete Playlist'}
                 </button>`:null}
               </div>`:null}
@@ -7133,15 +8508,41 @@ function ListsTab(props) {
       onBack=${function(){setSelectedList(null);}}
       onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
   }
-  const lists = props.lists || [];
+  const [localLists, setLocalLists] = useState(props.lists||[]);
   const [hovIdx, setHovIdx] = useState(-1);
+  const [listMenuOpen, setListMenuOpen] = useState(-1);
+  const [listMenuPos, setListMenuPos] = useState(null);
+  const [listMenuHov, setListMenuHov] = useState('');
+  const [listDeleting, setListDeleting] = useState(false);
+  useEffect(function(){setLocalLists(props.lists||[]);},[props.lists]);
+  useEffect(function(){
+    if(listMenuOpen<0) return;
+    function handler(){setListMenuOpen(-1);setListMenuPos(null);}
+    document.addEventListener('click',handler);
+    return function(){document.removeEventListener('click',handler);};
+  },[listMenuOpen]);
+  async function deleteList(l) {
+    if (!props.session) return;
+    if (!window.confirm('Delete list "'+l.name+'"? This cannot be undone.')) return;
+    setListDeleting(true);
+    try {
+      var rkey = l.uri.split('/').pop();
+      var r = await api(AUTH_PROXY+'/com.atproto.repo.deleteRecord', {
+        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+props.session.accessJwt},
+        body: JSON.stringify({repo:props.session.did, collection:'app.bsky.graph.list', rkey:rkey})
+      });
+      if (r.ok) setLocalLists(function(prev){return prev.filter(function(x){return x.uri!==l.uri;});});
+    } catch(e) {}
+    setListDeleting(false);
+    setListMenuOpen(-1);
+  }
   if (props.loading) return html`<div style=${{color:'#aaa',padding:20}}>Loading lists…</div>`;
-  if (!lists.length) return html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'30vh',gap:12,color:'#aaa'}}>
+  if (!localLists.length) return html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'30vh',gap:12,color:'#aaa'}}>
     <svg width="48" height="48" viewBox="0 0 24 24" fill="#3f3f3f"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
     <p style=${{fontSize:14}}>No lists.</p>
   </div>`;
   return html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>
-    ${lists.map(function(l,i){return html`<div key=${l.uri}
+    ${localLists.map(function(l,i){return html`<div key=${l.uri}
       style=${{display:'flex',alignItems:'center',gap:12,padding:'12px 16px',cursor:'pointer',
         background:hovIdx===i?'var(--accent-dim)':'#1a1a1a',
         border:'1px solid '+(hovIdx===i?'var(--accent)':'#2a2a2a'),
@@ -7158,7 +8559,21 @@ function ListsTab(props) {
         ${l.description?html`<div style=${{color:'#aaa',fontSize:12,marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${l.description}</div>`:null}
         ${l.listItemCount!==undefined?html`<div style=${{color:'#666',fontSize:11,marginTop:2}}>${l.listItemCount} members</div>`:null}
       </div>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill=${hovIdx===i?'var(--accent)':'#555'}><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+      <div style=${{position:'relative',flexShrink:0}} onClick=${function(e){e.stopPropagation();}}>
+        <button onClick=${function(e){e.stopPropagation();var rect=e.currentTarget.getBoundingClientRect();setListMenuPos({top:rect.bottom+4,right:window.innerWidth-rect.right});setListMenuOpen(listMenuOpen===i?-1:i);}}
+          style=${{background:'none',border:'1px solid var(--accent)',color:'var(--accent)',padding:'3px 7px',cursor:'pointer',display:'flex',alignItems:'center',fontSize:14,lineHeight:1}}>
+          ⋯
+        </button>
+        ${listMenuOpen===i&&listMenuPos?html`<div style=${{position:'fixed',top:listMenuPos.top+'px',right:listMenuPos.right+'px',background:'#1a1a1a',border:'1px solid var(--accent)',minWidth:160,zIndex:9999,boxShadow:'0 4px 20px rgba(0,0,0,0.85)'}} onClick=${function(e){e.stopPropagation();}}>
+          ${props.session&&l.creator&&l.creator.did===props.session.did?html`<button
+            style=${{display:'block',width:'100%',padding:'10px 14px',background:listMenuHov==='del_'+i?'rgba(244,68,68,0.12)':'none',border:'none',borderLeft:listMenuHov==='del_'+i?'2px solid #f44':'2px solid transparent',color:'#f87171',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif'}}
+            onMouseEnter=${function(){setListMenuHov('del_'+i);}}
+            onMouseLeave=${function(){setListMenuHov('');}}
+            onClick=${function(e){e.stopPropagation();deleteList(l);}}>
+            ${listDeleting?'Deleting…':'Delete List'}
+          </button>`:null}
+        </div>`:null}
+      </div>
     </div>`;
     })}
   </div>`;
@@ -7196,17 +8611,21 @@ function ListsView(props) {
             return api(PUB_PROXY+'/app.bsky.feed.getAuthorFeed?actor='+encodeURIComponent(actor.did)+'&limit=30&filter=posts_no_replies')
               .then(function(r){ return r.ok?r.json():{feed:[]}; })
               .then(function(d){
-                var feedPosts = (d.feed||[]).map(function(item){ return item.post; });
-                feedPosts.forEach(function(p){
+                var feedItems = (d.feed||[]);
+                feedItems.forEach(function(item){
+                  var p = item.post;
                   if(!p||(p.record&&p.record.reply)) return;
+                  if(item.reason&&item.reason['$type']==='app.bsky.feed.defs#reasonRepost'){
+                    p = Object.assign({},p,{_repostedBy:item.reason.by});
+                  }
                   if(isVid(p)&&!seenV.has(p.uri)){ vids.push(p); seenV.add(p.uri); }
-                  else if(!isVid(p)&&!seenP.has(p.uri)){ postList.push(p); seenP.add(p.uri); }
+                  else if(!isVid(p)&&!seenP.has(p.uri)){ postList.push({post:p,reason:item.reason}); seenP.add(p.uri); }
                 });
-                var latestVid  = feedPosts.find(isVid);
-                var latestPost = feedPosts[0];
+                var latestP = feedItems[0] && feedItems[0].post;
+                var latestVid = feedItems.map(function(i){return i.post;}).find(isVid);
                 var latestAt = Math.max(
                   latestVid  ? new Date(latestVid.indexedAt).getTime()  : 0,
-                  latestPost ? new Date(latestPost.indexedAt).getTime() : 0
+                  latestP ? new Date(latestP.indexedAt).getTime() : 0
                 );
                 return {actor:actor, latestAt:latestAt};
               })
@@ -7217,7 +8636,7 @@ function ListsView(props) {
         }
         stripData.sort(function(a,b){ return b.latestAt-a.latestAt; });
         vids.sort(function(a,b){ return new Date(b.indexedAt)-new Date(a.indexedAt); });
-        postList.sort(function(a,b){ return new Date(b.indexedAt)-new Date(a.indexedAt); });
+        postList.sort(function(a,b){ return new Date((b.post&&b.post.indexedAt)||0)-new Date((a.post&&a.post.indexedAt)||0); });
         if (!cancelled) {
           setStrip(stripData.map(function(r){return r.actor;}));
           setVideos(vids);
@@ -7272,34 +8691,78 @@ function ListsView(props) {
 
 // ── StarterPacksTab ───────────────────────────────────────────────────────────
 function StarterPacksTab(props) {
-  const packs = props.packs || [];
+  const [localPacks, setLocalPacks] = useState(props.packs||[]);
   const [hovIdx, setHovIdx] = useState(-1);
+  const [spMenuOpen, setSpMenuOpen] = useState(-1);
+  const [spMenuPos, setSpMenuPos] = useState(null);
+  const [spMenuHov, setSpMenuHov] = useState('');
+  const [spDeleting, setSpDeleting] = useState(false);
+  useEffect(function(){setLocalPacks(props.packs||[]);},[props.packs]);
+  useEffect(function(){
+    if(spMenuOpen<0) return;
+    function handler(){setSpMenuOpen(-1);setSpMenuPos(null);}
+    document.addEventListener('click',handler);
+    return function(){document.removeEventListener('click',handler);};
+  },[spMenuOpen]);
+  async function deletePack(sp) {
+    if (!props.session) return;
+    if (!window.confirm('Delete starter pack "'+((sp.record&&sp.record.name)||'this pack')+'"? This cannot be undone.')) return;
+    setSpDeleting(true);
+    try {
+      var rkey = sp.uri.split('/').pop();
+      var r = await api(AUTH_PROXY+'/com.atproto.repo.deleteRecord', {
+        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+props.session.accessJwt},
+        body: JSON.stringify({repo:props.session.did, collection:'app.bsky.graph.starterpack', rkey:rkey})
+      });
+      if (r.ok) setLocalPacks(function(prev){return prev.filter(function(x){var s=x.starterPack||x;return s.uri!==sp.uri;});});
+    } catch(e) {}
+    setSpDeleting(false);
+    setSpMenuOpen(-1);
+  }
   if (props.loading) return html`<div style=${{color:'#aaa',padding:20}}>Loading starter packs…</div>`;
-  if (!packs.length) return html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'30vh',gap:12,color:'#aaa'}}>
+  if (!localPacks.length) return html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'30vh',gap:12,color:'#aaa'}}>
     <svg width="48" height="48" viewBox="0 0 24 24" fill="#3f3f3f"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4l5 2.18V11c0 3.5-2.33 6.79-5 7.93-2.67-1.14-5-4.43-5-7.93V7.18L12 5z"/></svg>
     <p style=${{fontSize:14}}>No starter packs.</p>
   </div>`;
   return html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(220px,1fr))',gap:16}}>
-    ${packs.map(function(item,i){
+    ${localPacks.map(function(item,i){
       var sp = item.starterPack || item;
       var rec = sp.record || {};
-      return html`<div key=${sp.uri||i}
-        style=${{display:'flex',flexDirection:'column',gap:10,padding:16,cursor:'pointer',
-          background:hovIdx===i?'var(--accent-dim)':'#1a1a1a',
-          border:'1px solid '+(hovIdx===i?'var(--accent)':'#2a2a2a'),
-          transition:'background 0.15s, border-color 0.15s'}}
-        onMouseEnter=${function(){setHovIdx(i);}}
-        onMouseLeave=${function(){setHovIdx(-1);}}
-        onClick=${function(){props.onOpenPack&&props.onOpenPack(sp);}}>
-        <div style=${{display:'flex',alignItems:'center',gap:8}}>
-          <div style=${{width:36,height:36,background:'#2a2a2a',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill=${hovIdx===i?'var(--accent)':'#555'}><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></svg>
+      var isOwner = props.session && sp.creator && sp.creator.did === props.session.did;
+      return html`<div key=${sp.uri||i} style=${{position:'relative'}}>
+        <div
+          style=${{display:'flex',flexDirection:'column',gap:10,padding:16,cursor:'pointer',
+            background:hovIdx===i?'var(--accent-dim)':'#1a1a1a',
+            border:'1px solid '+(hovIdx===i?'var(--accent)':'#2a2a2a'),
+            transition:'background 0.15s, border-color 0.15s'}}
+          onMouseEnter=${function(){setHovIdx(i);}}
+          onMouseLeave=${function(){setHovIdx(-1);}}
+          onClick=${function(){props.onOpenPack&&props.onOpenPack(sp);}}>
+          <div style=${{display:'flex',alignItems:'center',gap:8}}>
+            <div style=${{width:36,height:36,background:'#2a2a2a',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill=${hovIdx===i?'var(--accent)':'#555'}><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></svg>
+            </div>
+            <div style=${{color:hovIdx===i?'var(--accent)':'#f1f1f1',fontSize:14,fontWeight:600,flex:1,minWidth:0,
+              overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${rec.name||'Starter Pack'}</div>
           </div>
-          <div style=${{color:hovIdx===i?'var(--accent)':'#f1f1f1',fontSize:14,fontWeight:600,flex:1,minWidth:0,
-            overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${rec.name||'Starter Pack'}</div>
+          ${rec.description?html`<div style=${{color:'#aaa',fontSize:12,lineHeight:1.4}}>${rec.description.slice(0,100)}${rec.description.length>100?'…':''}</div>`:null}
+          ${sp.joinedWeekCount!==undefined?html`<div style=${{color:'#666',fontSize:11}}>${fmt(sp.joinedWeekCount||0)} joined this week</div>`:null}
         </div>
-        ${rec.description?html`<div style=${{color:'#aaa',fontSize:12,lineHeight:1.4}}>${rec.description.slice(0,100)}${rec.description.length>100?'…':''}</div>`:null}
-        ${sp.joinedWeekCount!==undefined?html`<div style=${{color:'#666',fontSize:11}}>${fmt(sp.joinedWeekCount||0)} joined this week</div>`:null}
+        <div style=${{position:'absolute',top:8,right:8}} onClick=${function(e){e.stopPropagation();}}>
+          <button onClick=${function(e){e.stopPropagation();var rect=e.currentTarget.getBoundingClientRect();setSpMenuPos({top:rect.bottom+4,right:window.innerWidth-rect.right});setSpMenuOpen(spMenuOpen===i?-1:i);}}
+            style=${{background:'none',border:'1px solid var(--accent)',color:'var(--accent)',padding:'2px 6px',cursor:'pointer',fontSize:13,lineHeight:1}}>
+            ⋯
+          </button>
+          ${spMenuOpen===i&&spMenuPos?html`<div style=${{position:'fixed',top:spMenuPos.top+'px',right:spMenuPos.right+'px',background:'#1a1a1a',border:'1px solid var(--accent)',minWidth:160,zIndex:9999,boxShadow:'0 4px 20px rgba(0,0,0,0.85)'}} onClick=${function(e){e.stopPropagation();}}>
+            ${isOwner?html`<button
+              style=${{display:'block',width:'100%',padding:'10px 14px',background:spMenuHov==='del_'+i?'rgba(244,68,68,0.12)':'none',border:'none',borderLeft:spMenuHov==='del_'+i?'2px solid #f44':'2px solid transparent',color:'#f87171',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif'}}
+              onMouseEnter=${function(){setSpMenuHov('del_'+i);}}
+              onMouseLeave=${function(){setSpMenuHov('');}}
+              onClick=${function(e){e.stopPropagation();deletePack(sp);}}>
+              ${spDeleting?'Deleting…':'Delete Pack'}
+            </button>`:null}
+          </div>`:null}
+        </div>
       </div>`;
     })}
   </div>`;
@@ -7349,17 +8812,21 @@ function StarterPackView(props) {
             return api(PUB_PROXY+'/app.bsky.feed.getAuthorFeed?actor='+encodeURIComponent(actor.did)+'&limit=30&filter=posts_no_replies')
               .then(function(r){ return r.ok?r.json():{feed:[]}; })
               .then(function(d){
-                var feedPosts = (d.feed||[]).map(function(item){ return item.post; });
-                feedPosts.forEach(function(p){
+                var feedItems = (d.feed||[]);
+                feedItems.forEach(function(item){
+                  var p = item.post;
                   if(!p||(p.record&&p.record.reply)) return;
+                  if(item.reason&&item.reason['$type']==='app.bsky.feed.defs#reasonRepost'){
+                    p = Object.assign({},p,{_repostedBy:item.reason.by});
+                  }
                   if(isVid(p)&&!seenV.has(p.uri)){ vids.push(p); seenV.add(p.uri); }
-                  else if(!isVid(p)&&!seenP.has(p.uri)){ postList.push(p); seenP.add(p.uri); }
+                  else if(!isVid(p)&&!seenP.has(p.uri)){ postList.push({post:p,reason:item.reason}); seenP.add(p.uri); }
                 });
-                var latestVid  = feedPosts.find(isVid);
-                var latestPost = feedPosts[0];
+                var latestP = feedItems[0] && feedItems[0].post;
+                var latestVid = feedItems.map(function(i){return i.post;}).find(isVid);
                 var latestAt = Math.max(
-                  latestVid  ? new Date(latestVid.indexedAt).getTime()  : 0,
-                  latestPost ? new Date(latestPost.indexedAt).getTime() : 0
+                  latestVid ? new Date(latestVid.indexedAt).getTime() : 0,
+                  latestP   ? new Date(latestP.indexedAt).getTime()   : 0
                 );
                 return {actor:actor, latestAt:latestAt};
               })
@@ -7370,7 +8837,7 @@ function StarterPackView(props) {
         }
         stripData.sort(function(a,b){ return b.latestAt-a.latestAt; });
         vids.sort(function(a,b){ return new Date(b.indexedAt)-new Date(a.indexedAt); });
-        postList.sort(function(a,b){ return new Date(b.indexedAt)-new Date(a.indexedAt); });
+        postList.sort(function(a,b){ return new Date((b.post&&b.post.indexedAt)||0)-new Date((a.post&&a.post.indexedAt)||0); });
         if (!cancelled) {
           setStrip(stripData.map(function(r){return r.actor;}));
           setVideos(vids);
@@ -7517,7 +8984,8 @@ function ChannelPage(props) {
   const winW = useWindowWidth();
   const actor = props.actor;
   const [tab,         setTab]         = useState(props.initialTab || 'Content');
-  const [contentSub,  setContentSub]  = useState('Videos');
+  const [contentSub,  setContentSub]  = useState(function(){return loadContentSub();});
+  useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
   const [showEdit,    setShowEdit]    = useState(false);
   const [profileData, setProfileData] = useState(null);
   const [channelVideos, setChannelVideos] = useState([]);
@@ -7532,16 +9000,19 @@ function ChannelPage(props) {
   const [allPosts,    setAllPosts]    = useState([]);
   const [postsLoading,setPostsLoading]= useState(false);
   const [loadedDid,   setLoadedDid]   = useState(null);
-  const [likedPosts,  setLikedPosts]  = useState([]);
-  const [likedVids,   setLikedVids]   = useState([]);
-  const [likedLoading,setLikedLoading]= useState(false);
-  const [likedLoaded, setLikedLoaded] = useState(false);
+  const [likedPosts,    setLikedPosts]    = useState([]);
+  const [likedVids,     setLikedVids]     = useState([]);
+  const [likedLoading,  setLikedLoading]  = useState(false);
+  const [likedLoaded,   setLikedLoaded]   = useState(false);
+  const [likedCursor,   setLikedCursor]   = useState(null);
+  const [likedHasMore,  setLikedHasMore]  = useState(false);
+  const [likedLoadingMore,setLikedLoadingMore]= useState(false);
 
   // Fetch profile + videos when actor changes
   useEffect(function(){
     if(!actor) return;
     var cancelled = false;
-    setProfileData(null); setChannelVideos([]); setChannelLoading(true);
+    setProfileData(null); setChannelVideos([]); setChannelLoading(true); setCustomSettingsLoaded(false); setCustomIconUrl(null); setCustomBannerUrl(null); setChannelImagePosts([]); setImagePostsLoaded(false); setImagePostsLoading(false); setLikedPosts([]); setLikedVids([]); setLikedLoaded(false); setLikedCursor(null); setLikedHasMore(false);
     (async function(){
       try{
         const sess = loadSession();
@@ -7555,6 +9026,7 @@ function ChannelPage(props) {
         const seen = new Set(); const vids = [];
         let cursor = null; let pageCount = 0; const MAX_PAGES = 20;
         do{
+          _devLog('API','read','getAuthorFeed:'+actor);
           const url = PUB_PROXY+'/app.bsky.feed.getAuthorFeed?actor='+encodeURIComponent(actor)
             +'&limit=100&filter=posts_with_media'+(cursor?'&cursor='+encodeURIComponent(cursor):'');
           let fR; try{ fR = await api(url); }catch(e){ break; }
@@ -7607,6 +9079,14 @@ function ChannelPage(props) {
   const [reposts,     setReposts]     = useState([]);
   const [repostsLoading, setRepostsLoading] = useState(false);
   const [repostsLoaded,  setRepostsLoaded]  = useState(false);
+  const [customIconUrl,  setCustomIconUrl]  = useState(null);
+  const [customBannerUrl,setCustomBannerUrl]= useState(null);
+  const [customSettingsLoaded, setCustomSettingsLoaded] = useState(false);
+  const [imgViewer, setImgViewer] = useState(null); // {images:[{thumb,fullsize,alt}]}
+  const [channelImagePosts,    setChannelImagePosts]    = useState([]);
+  const [imagePostsLoading,    setImagePostsLoading]    = useState(false);
+  const [imagePostsLoaded,     setImagePostsLoaded]     = useState(false);
+  const [gridSizeTick,   setGridSizeTick]   = useState(0);
   // Lists / Playlists / Starter Packs
   const [channelLists,       setChannelLists]       = useState(null); // null = not loaded
   const [channelPlaylists,   setChannelPlaylists]   = useState(null);
@@ -7631,6 +9111,7 @@ function ChannelPage(props) {
   const [tabEditId,          setTabEditId]          = useState(null);
   const [tabEditName,        setTabEditName]        = useState('');
   const [showAddDefaultsMenu,setShowAddDefaultsMenu]= useState(null); // null=closed, {top,right}=open
+  const [tabsPendingSave,  setTabsPendingSave]  = useState(false);
   useEffect(function(){
     if(!showAddDefaultsMenu) return;
     function _closeAddDef(){ setShowAddDefaultsMenu(null); }
@@ -7669,6 +9150,7 @@ function ChannelPage(props) {
   const [thoughtsLoading,    setThoughtsLoading]    = useState(false);
   const [thoughtsEnabled,    setThoughtsEnabled]    = useState(false);
   const [thoughtsHeading,    setThoughtsHeading]    = useState(undefined);
+  const [thoughtsHashtag,    setThoughtsHashtag]    = useState(null);
   const [thoughtsInput,      setThoughtsInput]      = useState('');
   const [thoughtsSubmitting, setThoughtsSubmitting] = useState(false);
   const [thoughtsErr,        setThoughtsErr]        = useState('');
@@ -7683,6 +9165,13 @@ function ChannelPage(props) {
     if(props.initialTab) setTab(props.initialTab);
     if(props.initialPlaylist) setPendingPlaylistUri(props.initialPlaylist);
   }, [props.navSeq]);
+
+  // Trigger liked load when profile loads while Liked tab is already open
+  useEffect(function(){
+    if (tab === 'Likes' && d && d.did && !likedLoaded && !likedLoading) {
+      loadLikes(d.did);
+    }
+  }, [tab, d, likedLoaded, likedLoading]);
 
   // Open a pending playlist once playlists are loaded
   useEffect(function(){
@@ -7704,7 +9193,7 @@ function ChannelPage(props) {
     if (d && d.did && d.did !== loadedDid) {
       setAllPosts([]);
       setLoadedDid(null);
-      if (tab === 'Content' && contentSub === 'Posts') loadPosts(d.did);
+      if (tab === 'Content' && (contentSub === 'Posts' || contentSub === 'Timeline' || contentSub === 'Hybrid')) loadPosts(d.did);
     }
   }, [d && d.did]);
 
@@ -7844,34 +9333,72 @@ function ChannelPage(props) {
     setThoughtsEnabled(false);
     try {
       var hdrs = sess ? {headers:{Authorization:'Bearer '+sess.accessJwt}} : {};
-      var r = await api(AUTH_PROXY+'/com.atproto.repo.listRecords?repo='+encodeURIComponent(did)+'&collection=raccnet.channel.post&limit=50', hdrs);
+      var hashtag = null;
+      try {
+        // Use cache if available, only hit PDS if no cache
+        var cached = await readSettingsCache(did);
+        if (cached) {
+          setThoughtsHeading(cached.thoughtsHeading||null);
+          hashtag = cached.thoughtsHashtag||null;
+          setThoughtsHashtag(hashtag);
+          setCustomIconUrl(cached.customIconUrl||null);
+          setCustomBannerUrl(cached.customBannerUrl||null);
+          setCustomSettingsLoaded(true);
+        } else {
+          _devLog('PDS','read','raccnet.channel.settings:'+did);
+          var sr = await api(AUTH_PROXY+'/com.atproto.repo.getRecord?repo='+encodeURIComponent(did)+'&collection=raccnet.channel.settings&rkey=self', hdrs);
+          if (sr.ok) {
+            var sd = await sr.json();
+            var sv = sd.value||{};
+            setThoughtsHeading(sv.thoughtsHeading||null);
+            hashtag = sv.thoughtsHashtag||null;
+            setThoughtsHashtag(hashtag);
+            setCustomIconUrl(sv.customIconUrl||null);
+            setCustomBannerUrl(sv.customBannerUrl||null);
+            await writeSettingsCache(did, sv);
+          } else {
+            setThoughtsHeading(null); setCustomIconUrl(null); setCustomBannerUrl(null);
+          }
+          setCustomSettingsLoaded(true);
+        }
+      } catch(e2) { setThoughtsHeading(null); setCustomIconUrl(null); setCustomBannerUrl(null); setCustomSettingsLoaded(true); }
+      // Fetch text-only posts via AppView
+      var feedUrl = PUB_PROXY+'/app.bsky.feed.getAuthorFeed?actor='+encodeURIComponent(did)+'&limit=100&filter=posts_no_replies';
+      var r = await api(feedUrl, hdrs);
       if (!r.ok) { setThoughtsLoading(false); return; }
       var data = await r.json();
-      var records = data.records || [];
-      if (!records.length && !(sess && sess.did === did)) { setThoughtsLoading(false); return; }
-      setThoughtsEnabled(records.length > 0);
-      try {
-        var sr = await api(AUTH_PROXY+'/com.atproto.repo.getRecord?repo='+encodeURIComponent(did)+'&collection=raccnet.channel.settings&rkey=self', hdrs);
-        if (sr.ok) { var sd = await sr.json(); setThoughtsHeading((sd.value&&sd.value.thoughtsHeading)||null); }
-        else { setThoughtsHeading(null); }
-      } catch(e) { setThoughtsHeading(null); }
-      if (!records.length) { setThoughtsPosts([]); setThoughtsLoading(false); return; }
-      var uris = records.map(function(rec){return rec.value&&rec.value.postUri;}).filter(Boolean);
-      var qstr = uris.map(function(u){return 'uris='+encodeURIComponent(u);}).join('&');
-      var postsHdrs = sess ? {headers:{Authorization:'Bearer '+sess.accessJwt}} : {};
-      var pr = await api((sess?AUTH_PROXY:PUB_PROXY)+'/app.bsky.feed.getPosts?'+qstr, postsHdrs);
-      if (pr.ok) {
-        var pd = await pr.json();
-        var postMap = {};
-        (pd.posts||[]).forEach(function(p){postMap[p.uri]=p;});
-        var ordered = records
-          .filter(function(rec){return rec.value&&postMap[rec.value.postUri];})
-          .sort(function(a,b){return new Date(b.value.createdAt)-new Date(a.value.createdAt);})
-          .map(function(rec){return {post:postMap[rec.value.postUri],recordUri:rec.uri};});
-        setThoughtsPosts(ordered);
-      }
+      var posts = (data.feed||[])
+        .map(function(item){ return item.post||item; })
+        .filter(function(p){
+          if (!p || !p.record) return false;
+          // Text-only: no video embed, no image embed
+          var rec = p.record;
+          if (rec.embed) {
+            var et = (rec.embed['$type']||'');
+            if (et.includes('video')||et.includes('image')) return false;
+          }
+          if (p.embed) {
+            var et2 = (p.embed['$type']||'');
+            if (et2.includes('video')||et2.includes('image')) return false;
+          }
+          // If hashtag filter is set, require that hashtag
+          if (hashtag) {
+            var tag = hashtag.startsWith('#') ? hashtag.toLowerCase() : ('#'+hashtag).toLowerCase();
+            var text = (rec.text||'').toLowerCase();
+            if (!text.includes(tag)) return false;
+          }
+          return true;
+        })
+        .slice(0, 50);
+      setThoughtsEnabled(posts.length > 0 || (isOwn && sess));
+      setThoughtsPosts(posts.map(function(p){ return {post:p, recordUri:p.uri}; }));
     } catch(e) {}
     setThoughtsLoading(false);
+  }
+
+  function openImgPost(item, initialIdx) {
+    var p = item.post || item;
+    if (window.raccnetOpenImage) { window.raccnetOpenImage(p); }
   }
 
   async function submitThought() {
@@ -7879,6 +9406,11 @@ function ChannelPage(props) {
     setThoughtsSubmitting(true); setThoughtsErr('');
     try {
       var text = thoughtsInput.trim();
+      // Append hashtag if configured
+      if (thoughtsHashtag) {
+        var tag = thoughtsHashtag.startsWith('#') ? thoughtsHashtag : ('#'+thoughtsHashtag);
+        if (!text.toLowerCase().includes(tag.toLowerCase())) text = text + ' ' + tag;
+      }
       var now = new Date().toISOString();
       var postRecord = {'$type':'app.bsky.feed.post', text:text, createdAt:now};
       var facets = buildUrlFacets(text);
@@ -7889,70 +9421,108 @@ function ChannelPage(props) {
       });
       if (!postRes.ok) throw new Error(await postRes.text());
       var postData = await postRes.json();
-      var idxRes = await api(AUTH_PROXY+'/com.atproto.repo.createRecord', {
-        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
-        body:JSON.stringify({repo:sess.did, collection:'raccnet.channel.post', record:{
-          '$type':'raccnet.channel.post', postUri:postData.uri, postCid:postData.cid||'', createdAt:now
-        }})
-      });
-      if (!idxRes.ok) throw new Error(await idxRes.text());
-      var idxData = await idxRes.json();
       setThoughtsInput('');
       setThoughtsEnabled(true);
-      // Prepend directly to state — avoids relying on indexer catching up
-      var newEntry = {
-        post: {uri:postData.uri, cid:postData.cid||'', record:postRecord,
-          author:{did:sess.did,handle:sess.handle,displayName:sess.displayName,avatar:sess.avatar}},
-        recordUri: idxData.uri
-      };
-      setThoughtsPosts(function(prev){return [newEntry].concat(prev);});
+      var newPost = {uri:postData.uri, cid:postData.cid||'', record:postRecord,
+        author:{did:sess.did,handle:sess.handle,displayName:sess.displayName,avatar:sess.avatar}};
+      setThoughtsPosts(function(prev){return [{post:newPost,recordUri:postData.uri}].concat(prev);});
     } catch(e) { setThoughtsErr(e.message||'Failed to post'); }
     setThoughtsSubmitting(false);
   }
 
   async function removeThought(recordUri, postUri) {
     if (!sess) return;
+    var targetUri = postUri || recordUri;
+    if (!targetUri) return;
     try {
+      var rkey = targetUri.split('/').pop();
       await api(AUTH_PROXY+'/com.atproto.repo.deleteRecord', {
         method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
-        body:JSON.stringify({repo:sess.did, collection:'raccnet.channel.post', rkey:recordUri.split('/').pop()})
+        body:JSON.stringify({repo:sess.did, collection:'app.bsky.feed.post', rkey:rkey})
       });
-      if (postUri) {
-        await api(AUTH_PROXY+'/com.atproto.repo.deleteRecord', {
-          method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
-          body:JSON.stringify({repo:sess.did, collection:'app.bsky.feed.post', rkey:postUri.split('/').pop()})
-        });
-      }
       setThoughtsPosts(function(prev){
-        var next = prev.filter(function(t){return t.recordUri!==recordUri;});
-        if (!next.length) setThoughtsEnabled(false);
+        var next = prev.filter(function(t){return t.recordUri!==recordUri&&t.post.uri!==targetUri;});
+        if (!next.length && !(sess&&sess.did===d.did)) setThoughtsEnabled(false);
         return next;
       });
     } catch(e) {}
   }
 
+  async function _fetchLikes(did, cursor) {
+    var sess = loadSession();
+    var ownDid = sess && sess.did;
+    // For own account: use getActorLikes via AUTH_PROXY (authenticated PDS endpoint)
+    if (ownDid && did === ownDid && sess.accessJwt) {
+      var url = AUTH_PROXY+'/app.bsky.feed.getActorLikes?actor='+encodeURIComponent(did)+'&limit=100'
+        +(cursor?'&cursor='+encodeURIComponent(cursor):'');
+      var r = null;
+      try { r = await api(url, {headers:{Authorization:'Bearer '+sess.accessJwt}}); } catch(e){}
+      if (!r||!r.ok) return null;
+      var data = await r.json();
+      return {feed: data.feed||[], cursor: data.cursor||null};
+    }
+    // For other accounts: list raw like records from PDS, then hydrate via AppView.
+    // AUTH_PROXY (bsky.social) serves com.atproto.repo.* for any public account.
+    var authHeader = (sess && sess.accessJwt) ? {Authorization:'Bearer '+sess.accessJwt} : {};
+    var listUrl = AUTH_PROXY+'/com.atproto.repo.listRecords?repo='+encodeURIComponent(did)
+      +'&collection=app.bsky.feed.like&limit=100'
+      +(cursor?'&cursor='+encodeURIComponent(cursor):'');
+    var lr = null;
+    try { lr = await api(listUrl, {headers:authHeader}); } catch(e){}
+    if (!lr||!lr.ok) return null;
+    var listData = await lr.json();
+    var records = listData.records||[];
+    var nextCursor = listData.cursor||null;
+    var uris = records.map(function(rec){
+      return rec.value&&rec.value.subject&&rec.value.subject.uri;
+    }).filter(Boolean);
+    if (!uris.length) return {feed:[], cursor:nextCursor};
+    // Hydrate in batches of 25
+    var allPosts = [];
+    for (var i=0; i<uris.length; i+=25) {
+      var batch = uris.slice(i, i+25);
+      var qStr = batch.map(function(u){ return 'uris='+encodeURIComponent(u); }).join('&');
+      try {
+        var pr = await api(PUB_PROXY+'/app.bsky.feed.getPosts?'+qStr);
+        if (pr.ok) {
+          var pd = await pr.json();
+          (pd.posts||[]).forEach(function(p){ allPosts.push({post:p}); });
+        }
+      } catch(e){}
+    }
+    return {feed: allPosts, cursor: nextCursor};
+  }
+
   async function loadLikes(did) {
     if(!did) return;
-    setLikedLoading(true);
-    setLikedPosts([]); setLikedVids([]);
+    setLikedLoading(true); setLikedPosts([]); setLikedVids([]); setLikedCursor(null); setLikedHasMore(false);
     try {
-      // Use public API — works for any account's public likes
-      var url = PUB_PROXY+'/app.bsky.feed.getActorLikes?actor='+encodeURIComponent(did)+'&limit=100';
-      var r   = await api(url);
-      if(!r.ok){
-        console.error('getActorLikes failed', r.status, await r.text().catch(function(){return '';}));
-        setLikedLoading(false); return;
-      }
-      var data  = await r.json();
+      var data = await _fetchLikes(did, null);
+      if (!data) { setLikedLoaded(true); setLikedLoading(false); return; }
       var items = data.feed||[];
       setLikedPosts(items);
-      var vids = items.map(function(i){return i.post||i;}).filter(function(p){
-        return p && (isVid(p)||isVidRaw(p));
-      });
-      setLikedVids(vids);
+      setLikedVids(items.map(function(i){return i.post||i;}).filter(function(p){return p&&(isVid(p)||isVidRaw(p));}));
+      setLikedCursor(data.cursor||null);
+      setLikedHasMore(!!data.cursor);
       setLikedLoaded(true);
     } catch(e){ console.error('loadLikes:', e); }
     setLikedLoading(false);
+  }
+
+  async function loadMoreLikes() {
+    var d = profileData; if(!d||!likedCursor||likedLoadingMore) return;
+    setLikedLoadingMore(true);
+    try {
+      var data = await _fetchLikes(d.did, likedCursor);
+      if (data) {
+        var items = data.feed||[];
+        setLikedPosts(function(prev){ return prev.concat(items); });
+        setLikedVids(function(prev){ return prev.concat(items.map(function(i){return i.post||i;}).filter(function(p){return p&&(isVid(p)||isVidRaw(p));})); });
+        setLikedCursor(data.cursor||null);
+        setLikedHasMore(!!data.cursor);
+      }
+    } catch(e){ console.error('loadMoreLikes:', e); }
+    setLikedLoadingMore(false);
   }
 
   async function loadReposts(did) {
@@ -7970,6 +9540,35 @@ function ChannelPage(props) {
       }
     } catch(e){ console.error('loadReposts:', e); }
     setRepostsLoading(false);
+  }
+
+  async function loadImagePosts(did) {
+    if (!did || imagePostsLoading) return;
+    setImagePostsLoading(true);
+    try {
+      var seen = new Set(); var imgs = [];
+      var cursor = null; var page = 0;
+      do {
+        var url = PUB_PROXY+'/app.bsky.feed.getAuthorFeed?actor='+encodeURIComponent(did)+'&limit=100&filter=posts_with_media'+(cursor?'&cursor='+encodeURIComponent(cursor):'');
+        var r = await api(url);
+        if (!r.ok) break;
+        var data = await r.json();
+        (data.feed||[]).forEach(function(item){
+          if (item.reason && item.reason['$type'] === 'app.bsky.feed.defs#reasonRepost') return;
+          var p = item.post||item;
+          if (!p || !p.embed || seen.has(p.uri)) return;
+          // Skip reply posts
+          if (p.record && p.record.reply) return;
+          var et = p.embed['$type']||'';
+          if (et.includes('image')) { imgs.push(item); seen.add(p.uri); }
+        });
+        cursor = data.cursor;
+        page++;
+      } while (cursor && page < 10);
+      setChannelImagePosts(imgs);
+    } catch(e) { console.error('loadImagePosts:', e); }
+    setImagePostsLoaded(true);
+    setImagePostsLoading(false);
   }
 
   async function loadListsAndPlaylists(did) {
@@ -8094,10 +9693,17 @@ function ChannelPage(props) {
           atItems.forEach(function(rec){ if(rec.value.postUri) setPlaylistAtUri(pl.uri, rec.value.postUri, rec.uri); });
           // Fetch all post data fresh from Bluesky — no localStorage for display
           var uris = atItems.map(function(i){return i.value.postUri;}).filter(Boolean);
+          var cachedPl = await readFeedCache('playlist:'+pl.uri);
+          if (cachedPl) {
+            setPlaylistVids(cachedPl);
+            setPlaylistVidsLoading(false);
+            return;
+          }
           var result = [];
           for (var i=0; i<uris.length; i+=25) {
             var batch = uris.slice(i, i+25);
             var qStr = batch.map(function(u){return 'uris='+encodeURIComponent(u);}).join('&');
+            _devLog('PDS','read','playlist:getPosts:'+batch.length+' uris');
             var pr = await api(PUB_PROXY+'/app.bsky.feed.getPosts?'+qStr);
             if (pr.ok) {
               var pd = await pr.json();
@@ -8105,6 +9711,7 @@ function ChannelPage(props) {
               setPlaylistVids(result.slice());
             }
           }
+          if (result.length) { await writeFeedCache('playlist:'+pl.uri, result); }
         }
       } catch(e) {}
     }
@@ -8168,10 +9775,10 @@ function ChannelPage(props) {
   }
 
   // ── Channel tabs system helpers ─────────────────────────────────────────────
-  const CONFIGURABLE_DEFAULTS = ['Content','Reposts','Liked','Playlists','Lists','Feeds','Starter Packs'];
+  const CONFIGURABLE_DEFAULTS = ['Content','Reposts','Likes','Playlists','Lists','Feeds','Starter Packs'];
 
   function getDefaultTabsCfg() {
-    var tabs = [{id:'Content',type:'default'},{id:'Reposts',type:'default'},{id:'Liked',type:'default'}];
+    var tabs = [{id:'Content',type:'default'},{id:'Reposts',type:'default'},{id:'Likes',type:'default'}];
     if (isOwn || (channelPlaylists && channelPlaylists.length)) tabs.push({id:'Playlists',type:'default'});
     if (channelLists && channelLists.length) tabs.push({id:'Lists',type:'default'});
     if (channelFeeds && channelFeeds.length) tabs.push({id:'Feeds',type:'default'});
@@ -8214,7 +9821,7 @@ function ChannelPage(props) {
     var cfg = getActiveCfg();
     if ((cfg.tabs||[]).some(function(t){return t.id===tabId;})) return;
     var newCfg = Object.assign({}, cfg, {tabs: cfg.tabs.concat([{id:tabId,type:'playlist',name:playlist.name||'Playlist',playlistUri:playlist.uri}])});
-    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg);
+    setChanTabsCfg(newCfg); setTabsPendingSave(true);
   }
 
   function removeTab(tabId) {
@@ -8223,7 +9830,7 @@ function ChannelPage(props) {
     var newHidden = (cfg.hiddenDefaults||[]).slice();
     if (CONFIGURABLE_DEFAULTS.indexOf(tabId)>=0 && newHidden.indexOf(tabId)<0) newHidden.push(tabId);
     var newCfg = Object.assign({}, cfg, {tabs:newTabs, hiddenDefaults:newHidden});
-    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg);
+    setChanTabsCfg(newCfg); setTabsPendingSave(true);
     if (tab === tabId && newTabs.length > 0) setTab(newTabs[0].id);
   }
 
@@ -8231,7 +9838,7 @@ function ChannelPage(props) {
     var cfg = getActiveCfg();
     var newTabs = (cfg.tabs||[]).map(function(t){return t.id===tabId?Object.assign({},t,{name:newName}):t;});
     var newCfg = Object.assign({}, cfg, {tabs:newTabs});
-    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg);
+    setChanTabsCfg(newCfg); setTabsPendingSave(true);
   }
 
   function reorderTabsCfg(fromId, toId) {
@@ -8243,7 +9850,7 @@ function ChannelPage(props) {
     var item = tabs.splice(fromIdx, 1)[0];
     tabs.splice(toIdx, 0, item);
     var newCfg = Object.assign({}, cfg, {tabs:tabs});
-    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg);
+    setChanTabsCfg(newCfg); setTabsPendingSave(true);
   }
 
   function addDefaultTab(tabId) {
@@ -8251,7 +9858,7 @@ function ChannelPage(props) {
     var newTabs = (cfg.tabs||[]).concat([{id:tabId,type:'default'}]);
     var newHidden = (cfg.hiddenDefaults||[]).filter(function(h){return h!==tabId;});
     var newCfg = Object.assign({}, cfg, {tabs:newTabs, hiddenDefaults:newHidden});
-    setChanTabsCfg(newCfg); saveChanTabsCfg(newCfg); setShowAddDefaultsMenu(false);
+    setChanTabsCfg(newCfg); setTabsPendingSave(true); setShowAddDefaultsMenu(false);
   }
 
   async function loadPlTabVids(plUri) {
@@ -8284,7 +9891,7 @@ function ChannelPage(props) {
     if (t === 'DMs') {
       setTimeout(function(){window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});},100);
     }
-    if (t === 'Liked' && !likedLoaded && d && d.did) {
+    if (t === 'Likes' && !likedLoaded && d && d.did) {
       await loadLikes(d.did);
     }
     if (t === 'Reposts' && !repostsLoaded && d && d.did) {
@@ -8322,8 +9929,11 @@ function ChannelPage(props) {
   }
   async function openContentSub(s) {
     setContentSub(s);
-    if (s === 'Posts' && d && d.did && d.did !== loadedDid) {
+    if ((s === 'Timeline' || s === 'Posts' || s === 'Hybrid') && d && d.did && d.did !== loadedDid) {
       await loadPosts(d.did);
+    }
+    if (s === 'Images' && d && d.did && !imagePostsLoaded && !imagePostsLoading) {
+      await loadImagePosts(d.did);
     }
   }
   if (channelLoading && !d) return html`<div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'50vh',color:'#aaa'}}>Loading channel...</div>`;
@@ -8364,10 +9974,15 @@ function ChannelPage(props) {
       session=${sess}
       data=${d}
       thoughtsHeading=${thoughtsHeading||''}
+      thoughtsHashtag=${thoughtsHashtag||''}
+      customIconUrl=${customIconUrl||null}
+      customBannerUrl=${customBannerUrl||null}
+      onMediaReset=${function(type){if(type==='icon')setCustomIconUrl(null);else setCustomBannerUrl(null);}}
       onClose=${function(){setShowEdit(false);}}
       onSaved=${function(updated){
         setProfileData(Object.assign({},d,updated));
         if(updated.thoughtsHeading!==undefined) setThoughtsHeading(updated.thoughtsHeading||null);
+        if(updated.thoughtsHashtag!==undefined) setThoughtsHashtag(updated.thoughtsHashtag||null);
         setShowEdit(false);
       }}
     />`:null}
@@ -8396,14 +10011,20 @@ function ChannelPage(props) {
       </div>
     </div>`:null}
 
-    <div style=${{width:'100%',background:d.banner?'none':'linear-gradient(135deg,#1a1a2e,#0f3460)',
+    <div style=${{width:'100%',background:(!customSettingsLoaded||customBannerUrl||d.banner)?'none':'linear-gradient(135deg,#1a1a2e,#0f3460)',
       overflow:'hidden'}}>
-      ${d.banner?html`<img src=${d.banner} alt="" style=${{width:'100%',maxHeight:320,objectFit:'cover',display:'block'}}/>`:html`<div style=${{height:240}}/>`}
+      ${!customSettingsLoaded
+        ? html`<div class="shimmer" style=${{width:'100%',height:200,background:'#1a1a1a'}}/>`
+        : (customBannerUrl||d.banner)
+          ? ((customBannerUrl||d.banner).includes('.m3u8')
+            ? html`<${HLSLooper} src=${customBannerUrl||d.banner} style=${{width:'100%',maxHeight:320,objectFit:'cover',display:'block'}}/>`
+            : html`<img src=${customBannerUrl||d.banner} alt="" style=${{width:'100%',maxHeight:320,objectFit:'cover',display:'block'}}/>`)
+          : html`<div style=${{height:240}}/>`}
     </div>
     <div style=${{padding:portrait?'0 12px':'0 24px',borderBottom:portrait?'none':'1px solid var(--accent)'}}>
       <div style=${{display:'flex',alignItems:'flex-start',gap:portrait?12:16,padding:portrait?'0 0 8px':'12px 0 12px'}}>
         <div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:portrait?6:8,flexShrink:0}}>
-          <${Avatar} src=${d.avatar} size=${portrait?Math.max(56,Math.min(100,Math.round(winW*0.22))):192}/>
+          <${Avatar} src=${customSettingsLoaded?(customIconUrl||d.avatar):null} size=${portrait?Math.max(56,Math.min(100,Math.round(winW*0.22))):192}/>
           ${false?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'stretch',gap:4,width:80}}>
             ${isOwn
               ? html`<button onClick=${function(){setShowEdit(true);}}
@@ -8564,7 +10185,7 @@ function ChannelPage(props) {
             var shouldShow = thoughtsHide !== 'all' &&
               ((isOwn && sess && thoughtsHide !== 'own') || (!isOwn && thoughtsEnabled));
             if (!shouldShow) return null;
-            var headingText = thoughtsHeading !== undefined && !thoughtsLoading ? (thoughtsHeading || ((d.displayName||d.handle)+"'s Thoughts")) : null;
+            var headingText = !thoughtsLoading ? (thoughtsHeading || ((d.displayName||d.handle)+"'s Thoughts")) : null;
             return html`<div style=${{flex:'1 0 0',minWidth:0}}>
               ${headingText?html`<div style=${{fontSize:13,fontWeight:600,color:'var(--accent)',marginBottom:6,letterSpacing:0.3}}>${headingText}</div>`:html`<div style=${{height:21,marginBottom:6}}/>`}
               <div style=${{border:'1px solid var(--accent)',display:'flex',flexDirection:'column',height:180,overflow:'hidden'}}>
@@ -8575,11 +10196,11 @@ function ChannelPage(props) {
                     var rec=t.post&&t.post.record;
                     return html`<div key=${t.recordUri}
                       style=${{padding:'8px 12px',borderBottom:'1px solid var(--accent)',
-                        display:'flex',alignItems:'flex-start',gap:8}}>
-                      <div style=${{flex:1,fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word',minWidth:0}}>
+                        display:'flex',flexDirection:'column',gap:4}}>
+                      <div style=${{fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word'}}>
                         ${renderMarkdown(rec&&rec.text||'',props.onChannel,triggerSearch)}
                       </div>
-                      <div style=${{display:'flex',alignItems:'center',gap:4,flexShrink:0,paddingTop:2}}>
+                      <div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:4}}>
                         <span style=${{fontSize:11,color:'#555',whiteSpace:'nowrap'}}>${ago(rec&&rec.createdAt||'')}</span>
                         ${!isOwn&&sess?html`<${ThoughtActions} post=${t.post} session=${sess}/>`:null}
                         ${isOwn?html`<button onClick=${function(){removeThought(t.recordUri,t.post&&t.post.uri);}}
@@ -8693,7 +10314,7 @@ function ChannelPage(props) {
         var shouldShow = thoughtsHide !== 'all' &&
           ((isOwn && sess && thoughtsHide !== 'own') || (!isOwn && thoughtsEnabled));
         if (!shouldShow || !d) return null;
-        var headingText = thoughtsHeading !== undefined && !thoughtsLoading ? (thoughtsHeading || ((d.displayName||d.handle)+"'s Thoughts")) : null;
+        var headingText = !thoughtsLoading ? (thoughtsHeading || ((d.displayName||d.handle)+"'s Thoughts")) : null;
         return html`<div style=${{padding:'0 12px 12px 12px'}}>
           ${headingText?html`<div style=${{fontSize:13,fontWeight:600,color:'var(--accent)',marginBottom:6,letterSpacing:0.3}}>${headingText}</div>`:html`<div style=${{height:21,marginBottom:6}}/>`}
           <div style=${{border:'1px solid var(--accent)',height:110,display:'flex',flexDirection:'column',overflow:'hidden'}}>
@@ -8703,11 +10324,11 @@ function ChannelPage(props) {
               ${thoughtsPosts.map(function(t,i){
                 var rec=t.post&&t.post.record;
                 return html`<div key=${t.recordUri}
-                  style=${{padding:'8px 12px',borderBottom:'1px solid var(--accent)',display:'flex',alignItems:'flex-start',gap:8}}>
-                  <div style=${{flex:1,fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word',minWidth:0}}>
+                  style=${{padding:'8px 12px',borderBottom:'1px solid var(--accent)',display:'flex',flexDirection:'column',gap:4}}>
+                  <div style=${{fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word'}}>
                     ${renderMarkdown(rec&&rec.text||'',props.onChannel,triggerSearch)}
                   </div>
-                  <div style=${{display:'flex',alignItems:'center',gap:4,flexShrink:0,paddingTop:2}}>
+                  <div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:4}}>
                     <span style=${{fontSize:11,color:'#555',whiteSpace:'nowrap'}}>${ago(rec&&rec.createdAt||'')}</span>
                     ${!isOwn&&sess?html`<${ThoughtActions} post=${t.post} session=${sess}/>`:null}
                     ${isOwn?html`<button onClick=${function(){removeThought(t.recordUri,t.post&&t.post.uri);}}
@@ -8821,22 +10442,48 @@ function ChannelPage(props) {
                 onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
                 onMouseLeave=${function(e){e.currentTarget.style.opacity='0.7';}}>+</button>`);
             }
+            if (isOwn && tabsPendingSave) tabEls.push(html`<button key="__save"
+              onClick=${async function(e){e.stopPropagation(); await saveChanTabsCfg(getActiveCfg()); setTabsPendingSave(false);}}
+              title="Save tab layout"
+              style=${{background:'var(--accent)',border:'none',color:'#000',fontSize:12,cursor:'pointer',padding:'4px 10px',
+                flexShrink:0,fontWeight:700,borderRadius:0,lineHeight:1}}>Save</button>`);
             if (!chanTabsLoaded) {
               return html`<div style=${{padding:'12px 20px',color:'#555',fontSize:13}}>Loading tabs…</div>`;
             }
             return tabEls;
           })()}
         </div>
-        ${(tab==='Content'||tab==='Reposts')?html`<div style=${{display:'flex',alignItems:'center',gap:4,marginRight:portrait?0:8,marginLeft:portrait?'auto':0,padding:portrait?'4px 4px':0}}>
-          <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory}/>
-          <button onClick=${function(){openContentSub('Videos');}} style=${{padding:portrait?'4px 10px':'6px 14px',background:contentSub==='Videos'?'var(--accent)':'none',color:contentSub==='Videos'?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>Videos</button>
-          <button onClick=${function(){openContentSub('Posts');}}  style=${{padding:portrait?'4px 10px':'6px 14px',background:contentSub==='Posts'?'var(--accent)':'none',color:contentSub==='Posts'?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>Posts</button>
+        ${(tab==='Content'||tab==='Reposts')?html`<div style=${{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap',marginRight:portrait?0:8,marginLeft:portrait?'auto':0,padding:portrait?'4px 4px':0}}>
+          <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?(contentSub==='Images'?'images':'videos'):null} gridOrient=${portrait?'portrait':'landscape'} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
+          ${['Hybrid','Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){openContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:contentSub===s?'var(--accent)':'none',color:contentSub===s?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>${s}</button>`;})}
         </div>`:null}
       </div>
     </div>
     <div style=${{padding:24}}>
-      ${tab==='Content'&&contentSub==='Videos'?html`<${VideoGrid} videos=${channelVideos} loading=${channelLoading&&!channelVideos.length} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter}/>`:null}
-      ${tab==='Content'&&contentSub==='Posts'?html`<div>
+      ${tab==='Content'&&contentSub==='Videos'?html`<${VideoGrid} videos=${channelVideos} loading=${channelLoading&&!channelVideos.length} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} gridCols=${loadGridSize('videos',portrait?'portrait':'landscape')} _tick=${gridSizeTick}/>`:null}
+      ${tab==='Content'&&contentSub==='Images'?html`<div>${(function(){
+        var imgPosts = channelImagePosts;
+        if (imagePostsLoading && !imgPosts.length) return html`<div style=${{color:'#aaa',padding:'32px',textAlign:'center'}}>Loading…</div>`;
+        if (imagePostsLoaded && !imgPosts.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No image posts found.</div>`;
+        if (!imagePostsLoaded) return html`<div style=${{color:'#aaa',padding:'32px',textAlign:'center'}}>Loading…</div>`;
+        var imgCols = loadGridSize('images', portrait?'portrait':'landscape');
+        return html`<div style=${{display:'grid',gridTemplateColumns:'repeat('+imgCols+',1fr)',gap:3}}>
+          ${imgPosts.map(function(item,i){
+            var p = item.post||item;
+            return html`<${PostImageCell} key=${i} post=${p}/>`;
+          })}
+        </div>`;
+      })()}</div>`:null}
+      ${tab==='Content'&&contentSub==='Hybrid'?html`<div>${(function(){
+        var vidItems = channelVideos.map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
+        var postItems = allPosts.map(function(item){var p=item.post||item;return {type:'post',item:item,date:new Date(p.indexedAt||p.record&&p.record.createdAt||0).getTime()};});
+        var combined = vidItems.concat(postItems).sort(function(a,b){return b.date-a.date;});
+        return html`<div>${combined.map(function(x,i){
+          if(x.type==='vid') return html`<${VideoGrid} key=${'v'+i} videos=${[x.post]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
+          return html`<${PostCard} key=${'p'+i} item=${x.item} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
+        })}</div>`;
+      })()}</div>`:null}
+      ${tab==='Content'&&(contentSub==='Timeline'||contentSub==='Posts')?html`<div>
         ${isOwn&&sess?html`<div style=${{marginBottom:16,paddingBottom:16,borderBottom:'1px solid #1e1e1e'}}>
           <input type='file' accept='image/*' ref=${composeFileRef} style=${{display:'none'}}
             onChange=${function(e){
@@ -8886,9 +10533,10 @@ function ChannelPage(props) {
         if(repostsLoading) return html`<div style=${{padding:'32px 0',textAlign:'center',color:'#aaa'}}>Loading reposts…</div>`;
         if(!reposts.length) return html`<div style=${{padding:'32px 0',textAlign:'center',color:'#aaa'}}>No reposts found.</div>`;
         if(contentSub==='Videos') return html`<${VideoGrid} items=${reposts} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter}/>`;
+        if(contentSub==='Images') return html`<${PostImageGrid} items=${reposts} cols=${loadGridSize('images',portrait?'portrait':'landscape')} loading=${repostsLoading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`;
         return html`<${ChannelPostsFeed} posts=${reposts} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey=${'reposts:'+(d&&d.handle||'')} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`;
       })()}</div>`:null}
-      ${tab==='Liked'?html`<${LikedTab} videos=${likedVids} posts=${likedPosts} loading=${likedLoading} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
+      ${tab==='Likes'?html`<${LikedTab} videos=${likedVids} posts=${likedPosts} loading=${likedLoading||!likedLoaded} hasMore=${likedHasMore} loadingMore=${likedLoadingMore} onLoadMore=${loadMoreLikes} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
       ${tab==='DMs'&&sess&&d?html`<${ChannelDMsTab} key=${dmTabKey} session=${sess} channelDid=${d.did} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
       ${tab==='Playlists'?html`<${PlaylistsTab}
         playlists=${channelPlaylists||[]} loading=${listsLoading}
@@ -8972,6 +10620,40 @@ function ChannelPage(props) {
 }
 
 
+// ── setCustomChannelMedia — set custom icon or banner URL in channel settings ──
+async function setCustomChannelMedia(sess, type, url) {
+  if (!sess || !url) return;
+  try {
+    var r = await api(AUTH_PROXY+'/com.atproto.repo.getRecord?repo='+encodeURIComponent(sess.did)+'&collection=raccnet.channel.settings&rkey=self',
+      {headers:{Authorization:'Bearer '+sess.accessJwt}});
+    var existing = r.ok ? ((await r.json()).value||{}) : {};
+    var record = Object.assign({}, existing, {'$type':'raccnet.channel.settings'});
+    record[type==='icon'?'customIconUrl':'customBannerUrl'] = url;
+    await api(AUTH_PROXY+'/com.atproto.repo.putRecord', {
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+      body: JSON.stringify({repo:sess.did, collection:'raccnet.channel.settings', rkey:'self', record:record})
+    });
+    await writeSettingsCache(sess.did, record);
+    alert('Set as channel '+(type==='icon'?'icon':'banner')+'!');
+  } catch(e) { alert('Failed: '+e.message); }
+}
+
+async function clearCustomChannelMedia(sess, type) {
+  if (!sess) return;
+  try {
+    var r = await api(AUTH_PROXY+'/com.atproto.repo.getRecord?repo='+encodeURIComponent(sess.did)+'&collection=raccnet.channel.settings&rkey=self',
+      {headers:{Authorization:'Bearer '+sess.accessJwt}});
+    var existing = r.ok ? ((await r.json()).value||{}) : {};
+    var record = Object.assign({}, existing, {'$type':'raccnet.channel.settings'});
+    delete record[type==='icon'?'customIconUrl':'customBannerUrl'];
+    await api(AUTH_PROXY+'/com.atproto.repo.putRecord', {
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+      body: JSON.stringify({repo:sess.did, collection:'raccnet.channel.settings', rkey:'self', record:record})
+    });
+    await writeSettingsCache(sess.did, record);
+  } catch(e) { console.error('clearCustomChannelMedia:', e); }
+}
+
 // ── Scroll memory — remember scroll position per page/tab ─────────────────────
 var _scrollMemory = {};
 function saveScrollPos(key) { _scrollMemory[key] = window.scrollY; }
@@ -8981,6 +10663,47 @@ function restoreScrollPos(key) {
       window.scrollTo(0, _scrollMemory[key]||0);
     });
   });
+}
+
+// ── RateLimitPage ─────────────────────────────────────────────────────────────
+function RateLimitPage() {
+  return html`<div style=${{minHeight:'100vh',background:'#0f0f0f',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:32,padding:24,textAlign:'center'}}>
+    <img src="/raccnet-icon.png" alt="RaccNet" style=${{width:120,height:120,objectFit:'contain'}}/>
+    <div>
+      <h1 style=${{color:'var(--accent)',fontSize:28,fontWeight:800,marginBottom:12}}>Rate Limited</h1>
+      <p style=${{color:'#aaa',fontSize:16,maxWidth:480,lineHeight:1.6,margin:'0 auto'}}>
+        RaccNet has hit Bluesky's rate limit (Error 429). Please wait a few minutes before continuing.
+      </p>
+      <p style=${{color:'#555',fontSize:13,marginTop:12}}>This is a temporary restriction from Bluesky's API.</p>
+      <button onClick=${function(){window.location.reload();}}
+        style=${{marginTop:24,padding:'12px 32px',background:'var(--accent)',color:'#000',border:'none',fontSize:15,fontWeight:700,cursor:'pointer',borderRadius:0}}>
+        Try Again
+      </button>
+    </div>
+  </div>`;
+}
+
+// ── LoginGatePage ─────────────────────────────────────────────────────────────
+function LoginGatePage(props) {
+  return html`<div style=${{minHeight:'100vh',background:'#0f0f0f',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:24,padding:24,textAlign:'center'}}>
+    <img src="/raccnet-icon.png" alt="RaccNet" style=${{width:120,height:120,objectFit:'contain'}}/>
+    <div>
+      <h1 style=${{color:'var(--accent)',fontSize:32,fontWeight:800,letterSpacing:-1,marginBottom:8}}>RaccNet</h1>
+      <p style=${{color:'#888',fontSize:14,marginBottom:4,fontStyle:'italic'}}>⚠ Work in progress — not finished</p>
+      <p style=${{color:'#aaa',fontSize:15,maxWidth:460,lineHeight:1.7,margin:'12px auto'}}>
+        RaccNet requires a Bluesky account to use. Sign in with your Bluesky handle and an <strong style=${{color:'var(--accent)'}}>App Password</strong>.
+      </p>
+      <p style=${{color:'#aaa',fontSize:14,maxWidth:460,lineHeight:1.7,margin:'0 auto'}}>
+        App Passwords are separate from your main password and can be revoked any time.
+        Create one at: <a href="https://bsky.app/settings/app-passwords" target="_blank" rel="noreferrer"
+          style=${{color:'var(--accent)'}}>bsky.app/settings/app-passwords</a>
+      </p>
+      <button onClick=${props.onLogin}
+        style=${{marginTop:28,padding:'13px 40px',background:'var(--accent)',color:'#000',border:'none',fontSize:16,fontWeight:700,cursor:'pointer',borderRadius:0,letterSpacing:0.5}}>
+        Sign In
+      </button>
+    </div>
+  </div>`;
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -9003,6 +10726,9 @@ function App() {
       window.removeEventListener('beforeunload', _kaBeforeUnload);
     };
   },[]);
+  const [rateLimited,    setRateLimited]   = useState(false);
+  const [devMode, setDevMode] = useState(function(){try{return localStorage.getItem('raccnet_devmode')==='1';}catch(e){return false;}});
+  const [sessionLoaded,  setSessionLoaded] = useState(false);
   const [session,       setSession]       = useState(function(){return loadSession();});
   const [likedUris,     setLikedUris]     = useState(function(){return new Set();});
   const [blockedDids,   setBlockedDids]   = useState(function(){return new Set();});
@@ -9021,6 +10747,7 @@ function App() {
   const [subsLoaded,    setSubsLoaded]    = useState(false);
   const [followStrip,   setFollowStrip]   = useState([]);
   const [friendsKey,    setFriendsKey]    = useState(0);
+  const [historyKey,    setHistoryKey]    = useState(0);
   const [layerSeq,      setLayerSeq]      = useState(0); // bumped when same-layer params change
   const [_prefetchBump, _setPrefetchBump] = useState(0); // bumped to trigger render of pre-mounted layers
 
@@ -9031,6 +10758,7 @@ function App() {
   // navIdx: current position in navHistory (useState triggers re-render on change)
   function _makeLayerKey(type, params) {
     if(type==='watch') return 'watch:'+(params.post&&params.post.uri||'');
+    if(type==='imgdetail') return 'imgdetail:'+(params.post&&params.post.uri||'');
     if(type==='channel') return 'channel:'+((params.actor||'').toLowerCase());
     if(type==='feed') return 'feed:'+(params.feedUri||'');
     if(type==='subfeed') return 'subfeed:'+(params.did||'');
@@ -9071,7 +10799,7 @@ function App() {
       return;
     }
     // Pause any playing videos before switching layers
-    document.querySelectorAll('video').forEach(function(v){try{v.pause();}catch(e){}});
+    (function(){var poolVids=Object.keys(_hlsPool).map(function(k){return _hlsPool[k].video;});document.querySelectorAll('video').forEach(function(v){try{if(poolVids.indexOf(v)<0)v.pause();}catch(e){}});})();
     // Find or create the layer
     var existing = navLayers.current.find(function(l){return l.key===key;});
     if(!existing){
@@ -9099,7 +10827,7 @@ function App() {
 
   const navBack = useCallback(function(){
     if(navIdxRef.current<=0) return;
-    document.querySelectorAll('video').forEach(function(v){try{v.pause();}catch(e){}});
+    (function(){var poolVids=Object.keys(_hlsPool).map(function(k){return _hlsPool[k].video;});document.querySelectorAll('video').forEach(function(v){try{if(poolVids.indexOf(v)<0)v.pause();}catch(e){}});})();
     var curKey = navHistory.current[navIdxRef.current];
     var curLayer = navLayers.current.find(function(l){return l.key===curKey;});
     if(curLayer) curLayer.scrollY = window.scrollY;
@@ -9114,7 +10842,7 @@ function App() {
 
   const navForward = useCallback(function(){
     if(navIdxRef.current>=navHistory.current.length-1) return;
-    document.querySelectorAll('video').forEach(function(v){try{v.pause();}catch(e){}});
+    (function(){var poolVids=Object.keys(_hlsPool).map(function(k){return _hlsPool[k].video;});document.querySelectorAll('video').forEach(function(v){try{if(poolVids.indexOf(v)<0)v.pause();}catch(e){}});})();
     var curKey = navHistory.current[navIdxRef.current];
     var curLayer = navLayers.current.find(function(l){return l.key===curKey;});
     if(curLayer) curLayer.scrollY = window.scrollY;
@@ -9132,6 +10860,16 @@ function App() {
     window.raccnetNavBack = navBack;
     window.raccnetNavForward = navForward;
   }, []);
+
+  // expose image open so PostImageGrid can push a nav layer without prop drilling
+  const handleImageOpen = useCallback(function(post){
+    addToHistory(post);
+    navigateTo('imgdetail', {post: post});
+  }, [navigateTo]);
+  useEffect(function(){
+    window.raccnetOpenImage = handleImageOpen;
+    return function(){ window.raccnetOpenImage = null; };
+  }, [handleImageOpen]);
 
   // ── Upload logic (lives at App level — persists across navigation) ────────────
   async function startUpload(sess, opts) {
@@ -9416,13 +11154,12 @@ function App() {
       if(fR.ok){
         const fd=await fR.json();
         const follows=(fd.follows||[]);
-        // Fetch each follow's latest posts in batches — use AUTH so viewer.like is returned
+        // Fetch each follow's latest posts in batches — use public AppView
         const followData=[];
         for(let i=0;i<follows.length;i+=5){
           const batch=follows.slice(i,i+5);
           const results=await Promise.all(batch.map(function(actor){
-            return api(AUTH_PROXY+'/app.bsky.feed.getAuthorFeed?actor='+encodeURIComponent(actor.did)+'&limit=20&filter=posts_with_media',
-              {headers:{Authorization:'Bearer '+session.accessJwt}})
+            return api(PUB_PROXY+'/app.bsky.feed.getAuthorFeed?actor='+encodeURIComponent(actor.did)+'&limit=20&filter=posts_with_media')
               .then(function(r){return r.ok?r.json():{feed:[]};})
               .then(function(d){
                 const posts=(d.feed||[]).map(function(i){
@@ -9678,6 +11415,10 @@ function App() {
 
   // ── Keep module-level refs in sync with React state ─────────────────────────
   useEffect(function(){
+    _globalRateLimited.set = setRateLimited;
+    return function(){ _globalRateLimited.set = null; };
+  }, [setRateLimited]);
+  useEffect(function(){
     _sessionRef.current = session;
     _sessionRef.set = setSession;
   }, [session]);
@@ -9764,6 +11505,7 @@ function App() {
     } else if(lastPage==='subs' && saved){
       handleSubs();
     }
+    setSessionLoaded(true);
   },[]);
 
   const portrait = usePortrait();
@@ -9778,6 +11520,7 @@ function App() {
                   : _activeKey.startsWith('feed:') ? 'feed'
                   : _activeKey.startsWith('channel:') ? 'channel'
                   : _activeKey.startsWith('watch:') ? 'watch'
+                  : _activeKey.startsWith('imgdetail:') ? 'imgdetail'
                   : _activeKey.startsWith('subfeed:') ? 'subfeed'
                   : 'search';
 
@@ -9787,15 +11530,20 @@ function App() {
     if(t==='search') return html`<${SearchPage} results=${searchResults} loading=${searchLoading} query=${searchQuery} session=${session} onWatch=${handleWatch} onChannel=${handleChannel} onFeedSelect=${handleFeedSelect} onSignIn=${function(){setShowLogin(true);}}/>`;
     if(t==='subs')   return html`<${SubsPage} videos=${subsVideos} loading=${subsLoading} followStrip=${followStrip} session=${session} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
     if(t==='friends')return html`<${FriendsFeed} session=${session} key=${friendsKey} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
-    if(t==='history')return html`<${HistoryPage} session=${session} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
+    if(t==='history')return html`<${HistoryPage} key=${historyKey} session=${session} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
     if(t==='watchlist')return html`<${WatchlistPage} session=${session} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
     if(t==='settings')return html`<${SettingsPage} session=${session} onLogout=${function(){clearSession();setSession(null);setFeeds(DEFAULT_FEEDS);setSubsVideos([]);setSubsLoaded(false);navigateTo('search',{});}} onMyChannel=${function(){if(session&&session.handle) handleChannel(session.handle);}}/>`;
     if(t==='watch'&&p.post) return html`<${WatchPage} post=${p.post} session=${session} onLogin=${function(){setShowLogin(true);}} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
+    if(t==='imgdetail'&&p.post) return html`<${ImageDetailPage} post=${p.post} session=${session} onBack=${navBack} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
     if(t==='channel') return html`<${ChannelPage} actor=${p.actor} session=${session} onBack=${navBack} onWatch=${handleWatch} onChannel=${handleChannel} onSubFeed=${handleSubFeed} onFeedSelect=${handleFeedSelect} initialTab=${p.initialTab||null} initialPlaylist=${p.initialPlaylist||null} navSeq=${p._navSeq||0}/>`;
     if(t==='feed')    return html`<${FeedPage} feedUri=${p.feedUri} feedName=${p.feedName||''} session=${session} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
     if(t==='subfeed') return html`<${SubscribedFeedPage} did=${p.did} handle=${p.handle} session=${session} onBack=${navBack} onWatch=${handleWatch} onChannel=${handleChannel}/>`;
     return null;
   }
+
+  if (rateLimited) return html`<${RateLimitPage}/>`;
+  if (sessionLoaded && !session) return html`<${LoginGatePage} onLogin=${function(){setShowLogin(true);}}/>
+    ${showLogin?html`<${LoginModal} onClose=${function(){setShowLogin(false);}} onSuccess=${handleLoginSuccess}/>`:null}`;
 
   return html`<${BlockedDidsCtx.Provider} value=${blockedDids}><${LikedUrisCtx.Provider} value=${likedUris}>
   <div style=${{minHeight:'100vh',background:'#0f0f0f',color:'#f1f1f1',overflowX:'hidden',maxWidth:'100vw'}}>
@@ -9827,7 +11575,7 @@ function App() {
       onSearch=${function(){navigateTo('search',{});}}
       onSubs=${function(){handleSubs();}}
       onFriends=${function(){navigateTo('friends',{});}}
-      onHistory=${function(){navigateTo('history',{});}}
+      onHistory=${function(){setHistoryKey(function(k){return k+1;}); navigateTo('history',{});}}
       onWatchlist=${function(){navigateTo('watchlist',{});}}
       onPlaylists=${function(){if(session&&session.handle)handleChannel(session.handle,{openTab:'Playlists'});}}
       onSettings=${function(){navigateTo('settings',{});}}
@@ -9848,7 +11596,7 @@ function App() {
           bottom:   isActive ? 'auto' : '0',
           visibility: isActive ? 'visible' : 'hidden',
           pointerEvents: isActive ? 'auto' : 'none',
-          zIndex:   isActive ? 1 : 0,
+          zIndex:   isActive ? 'auto' : 0,
           minHeight: isActive ? '100%' : undefined,
         }}>
           ${_renderLayerContent(layer)}
@@ -9858,6 +11606,7 @@ function App() {
 
     ${showLogin?html`<${LoginModal} onClose=${function(){setShowLogin(false);}} onSuccess=${handleLoginSuccess}/>`:null}
     ${showUpload&&session?html`<${UploadModal} session=${session} onClose=${function(){setShowUpload(false);}} onStartUpload=${startUpload}/>`:null}
+    ${devMode?html`<${DevConsole} onClose=${function(){setDevMode(false);localStorage.removeItem('raccnet_devmode');}}/>`:null}
   </div>
   </${LikedUrisCtx.Provider}></${BlockedDidsCtx.Provider}>`;
 }
@@ -9925,12 +11674,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._get_part()
         elif self.path.startswith("/download/hls"):
             self._handle_hls_download()
+        elif self.path.startswith("/proxy-download"):
+            self._proxy_download()
         elif self.path.startswith("/gif-info"):
             self._gif_info()
         elif self.path.startswith("/local-data/"):
             name = self.path[len("/local-data/"):]
             if name in ("history", "watchlist"):
                 self._get_local_data(name)
+            else:
+                self.send_response(404); self.end_headers()
+        elif self.path == "/raccnet-icon.png":
+            import os as _os
+            _icon_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "RaccNet Icon.png")
+            if _os.path.exists(_icon_path):
+                with open(_icon_path, 'rb') as _f:
+                    _data = _f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(_data)))
+                self.end_headers()
+                self.wfile.write(_data)
             else:
                 self.send_response(404); self.end_headers()
         else:
@@ -9970,6 +11734,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._split_video()
         elif self.path == "/make-gif":
             self._make_gif()
+        elif self.path == "/make-gif-image":
+            self._make_gif_image()
         elif self.path.startswith("/local-data/"):
             name = self.path[len("/local-data/"):]
             if name in ("history", "watchlist"):
@@ -10113,6 +11879,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_error(500, f'Download failed: {e}')
             except Exception:
                 pass
+
+    def _proxy_download(self):
+        """Proxy an image URL through the server so the browser can download it with the correct filename."""
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        url = qs.get('url', [''])[0]
+        filename = qs.get('filename', ['raccnet_image'])[0]
+        if not url:
+            self.send_error(400, 'Missing url'); return
+        try:
+            hdrs = {'User-Agent': 'RaccNet/1.0', 'Origin': 'https://bsky.app',
+                    'Referer': 'https://bsky.app/'}
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, context=_SSL_CTX, timeout=30) as resp:
+                ctype = resp.headers.get('Content-Type', 'image/jpeg')
+                data = resp.read()
+            # Sanitise filename
+            import re as _re
+            safe = _re.sub(r'[^\w\-. ]', '_', filename)[:120] or 'raccnet_image'
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Content-Disposition', f'attachment; filename="{safe}"')
+            self.send_cors()
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json_error(500, str(e))
 
     def _gif_info(self):
         """Return width, height, fps for an HLS playlist URL by probing the first media segment."""
@@ -10460,6 +12253,153 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if r2.returncode != 0:
                 self._json_error(500, "FFmpeg GIF pass failed: " + self._ffmpeg_err(r2.stderr))
                 return
+
+            with open(gif_path, 'rb') as f:
+                gif_data = f.read()
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/gif')
+            self.send_header('Content-Disposition', 'attachment; filename="raccnet.gif"')
+            self.send_header('Content-Length', str(len(gif_data)))
+            self.send_cors()
+            self.end_headers()
+            self.wfile.write(gif_data)
+
+        except subprocess.TimeoutExpired:
+            self._json_error(500, "GIF creation timed out")
+        except Exception as e:
+            self._json_error(500, str(e))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _make_gif_image(self):
+        """Convert a static image URL to an animated GIF using FFmpeg (crop, scale, optional text)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            params = json.loads(body)
+        except Exception as e:
+            self._json_error(400, f"Bad request: {e}"); return
+
+        image_url   = str(params.get("image_url", "")).strip()
+        out_w_req   = max(64, min(1920, int(params.get("width", 480))))
+        crop_left   = max(0.0, min(49.0, float(params.get("crop_left", 0))))
+        crop_right  = max(0.0, min(49.0, float(params.get("crop_right", 0))))
+        crop_top    = max(0.0, min(49.0, float(params.get("crop_top", 0))))
+        crop_bottom = max(0.0, min(49.0, float(params.get("crop_bottom", 0))))
+        add_text    = bool(params.get("add_text", False))
+        text        = str(params.get("text", ""))[:200].strip()
+        text_box_h  = max(10, min(400, int(params.get("text_box_height", 40))))
+        text_size   = max(6, min(120, int(params.get("text_size", 16))))
+        text_weight = max(0.0, min(10.0, float(params.get("text_weight", 0))))
+        do_crop     = crop_left > 0 or crop_right > 0 or crop_top > 0 or crop_bottom > 0
+
+        if not image_url:
+            self._json_error(400, "Missing image_url"); return
+
+        ffmpeg = self._find_ffmpeg()
+        if not ffmpeg:
+            self._json_error(500, "FFmpeg not found. Please install FFmpeg."); return
+
+        cf = 0x08000000 if sys.platform == 'win32' else 0
+        tmpdir = tempfile.mkdtemp(prefix="raccnet_gif_img_")
+        try:
+            hdrs = {'User-Agent': 'RaccNet/1.0', 'Origin': 'https://bsky.app'}
+            req = urllib.request.Request(image_url, headers=hdrs)
+            with urllib.request.urlopen(req, context=_SSL_CTX, timeout=30) as resp:
+                img_data = resp.read()
+
+            # Detect extension from content-type
+            ctype = resp.headers.get('Content-Type', 'image/jpeg').lower()
+            ext = '.jpg'
+            if 'png' in ctype: ext = '.png'
+            elif 'webp' in ctype: ext = '.webp'
+            elif 'gif' in ctype: ext = '.gif'
+
+            img_path = os.path.join(tmpdir, "input" + ext)
+            with open(img_path, 'wb') as f:
+                f.write(img_data)
+
+            # Probe image dimensions if cropping
+            vid_w, vid_h = 0, 0
+            if do_crop:
+                ff_dir = os.path.dirname(ffmpeg) if os.path.isabs(ffmpeg) else ""
+                ext2 = '.exe' if sys.platform == 'win32' else ''
+                ffprobe = (os.path.join(ff_dir, 'ffprobe' + ext2)
+                           if ff_dir and os.path.isfile(os.path.join(ff_dir, 'ffprobe' + ext2))
+                           else shutil.which('ffprobe') or 'ffprobe')
+                try:
+                    probe = subprocess.run(
+                        [ffprobe, "-v", "error", "-select_streams", "v:0",
+                         "-show_entries", "stream=width,height", "-of", "csv=p=0", img_path],
+                        capture_output=True, text=True, timeout=30, creationflags=cf)
+                    if probe.returncode == 0 and probe.stdout.strip():
+                        pts = [x for x in probe.stdout.strip().replace('\n', ',').split(',') if x]
+                        if len(pts) >= 2:
+                            vid_w, vid_h = int(pts[0]), int(pts[1])
+                except Exception:
+                    pass
+                if vid_w <= 0 or vid_h <= 0:
+                    do_crop = False
+
+            out_w = out_w_req if out_w_req % 2 == 0 else out_w_req - 1
+            out_w = max(2, out_w)
+
+            vf_parts = []
+            if do_crop:
+                cx = max(0, round(vid_w * crop_left  / 100))
+                cy = max(0, round(vid_h * crop_top   / 100))
+                cw = round(vid_w * (1 - crop_left / 100 - crop_right  / 100))
+                ch = round(vid_h * (1 - crop_top  / 100 - crop_bottom / 100))
+                cw = max(2, cw if cw % 2 == 0 else cw - 1)
+                ch = max(2, ch if ch % 2 == 0 else ch - 1)
+                if cx + cw <= vid_w and cy + ch <= vid_h:
+                    vf_parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
+
+            render_scale = 2 if (add_text and text) else 1
+            vf_parts.append(f"scale={out_w * render_scale}:-2")
+
+            if add_text and text:
+                esc = (text.replace('\\', '\\\\')
+                           .replace("'", "\\'")
+                           .replace(':', '\\:')
+                           .replace('%', '\\%'))
+                font_path = self._find_font()
+                if font_path:
+                    fp = font_path.replace('\\', '/').replace(':', '\\:')
+                    font_spec = f"fontfile='{fp}'"
+                else:
+                    font_spec = "font=Arial"
+                tb = text_box_h if text_box_h % 2 == 0 else text_box_h + 1
+                tb2 = tb * render_scale
+                bw = int(round(text_weight * render_scale))
+                vf_parts.append(f"pad=iw:ih+{tb2}:0:{tb2}:white")
+                border_spec = f":borderw={bw}:bordercolor=black" if bw > 0 else ""
+                vf_parts.append(
+                    f"drawtext={font_spec}:text='{esc}':fontcolor=black:fontsize={text_size * render_scale}"
+                    f"{border_spec}:x=(w-text_w)/2:y=({tb2}-text_h)/2")
+                vf_parts.append(f"scale={out_w}:-2")
+
+            vf_base = ",".join(vf_parts) if vf_parts else f"scale={out_w}:-2"
+
+            palette_path = os.path.join(tmpdir, "palette.png")
+            gif_path     = os.path.join(tmpdir, "output.gif")
+
+            cmd1 = [ffmpeg, "-y", "-i", img_path, "-an",
+                    "-vf", vf_base + ",palettegen=max_colors=256:stats_mode=diff",
+                    palette_path]
+            r1 = subprocess.run(cmd1, capture_output=True, timeout=60, creationflags=cf)
+            if r1.returncode != 0:
+                self._json_error(500, "FFmpeg palette pass failed: " + self._ffmpeg_err(r1.stderr)); return
+            if not os.path.isfile(palette_path):
+                self._json_error(500, "FFmpeg palette pass produced no output. Stderr: " + self._ffmpeg_err(r1.stderr)); return
+
+            fc2 = f"[0:v]{vf_base}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5"
+            cmd2 = [ffmpeg, "-y", "-i", img_path, "-i", palette_path, "-an",
+                    "-filter_complex", fc2, "-loop", "0", gif_path]
+            r2 = subprocess.run(cmd2, capture_output=True, timeout=60, creationflags=cf)
+            if r2.returncode != 0:
+                self._json_error(500, "FFmpeg GIF pass failed: " + self._ffmpeg_err(r2.stderr)); return
 
             with open(gif_path, 'rb') as f:
                 gif_data = f.read()
