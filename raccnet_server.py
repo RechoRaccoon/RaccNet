@@ -3207,7 +3207,7 @@ function FriendsFeed(props) {
   var gridMode = contentSub==='Images'?'images':'videos';
   var gridOrient = portrait?'portrait':'landscape';
   var imgCols = loadGridSize('images',gridOrient);
-  var btnSt2 = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'var(--accent)',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0,opacity:active?1:0.55}; };
+  var btnSt2 = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
   return html`<div style=${{padding:24}}>
     <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8,
       position:'sticky',top:0,zIndex:50,background:'#0f0f0f',padding:'12px 0'}}>
@@ -3556,7 +3556,7 @@ function SubsPage(props) {
   var gridOrient = portrait?'portrait':'landscape';
   var imgCols = loadGridSize('images',gridOrient);
   var vidCols = loadGridSize('videos',gridOrient);
-  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'var(--accent)',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0,opacity:active?1:0.55}; };
+  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
 
   return html`<div style=${{padding:24}}>
     <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8,
@@ -3675,7 +3675,7 @@ function FeedPage(props) {
   var imgCols = loadGridSize('images',gridOrient);
   var vidCols = loadGridSize('videos',gridOrient);
 
-  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'var(--accent)',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0,opacity:active?1:0.55}; };
+  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
 
   return html`<div style=${{padding:24}}>
     <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8,
@@ -3949,7 +3949,7 @@ function HistoryPage(props) {
   function clearHistory(){
     saveHistory([]); setHistory([]);
   }
-  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'var(--accent)',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0,opacity:active?1:0.55}; };
+  var btnSt = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
   var imgItems = history.map(function(h){return {post:h};});
   var vidItems = history.filter(function(h){return isVid(h);});
   var emptyIcon = html`<svg width="64" height="64" viewBox="0 0 24 24" fill="#3f3f3f"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>`;
@@ -4273,11 +4273,11 @@ function CommentBox(props) {
               </div>
             </div>`
           : html`<button type='button'
-              style=${{background:'none',border:'1px solid var(--accent)',color:'var(--accent)',width:36,height:36,
+              style=${{background:'none',border:'1px solid #333',color:'#888',width:36,height:36,
                 cursor:'pointer',borderRadius:0,display:'flex',alignItems:'center',justifyContent:'center',
-                transition:'border-color 0.12s,color 0.12s',flexShrink:0,padding:0,opacity:0.6}}
-              onMouseEnter=${function(e){e.currentTarget.style.opacity='1';}}
-              onMouseLeave=${function(e){e.currentTarget.style.opacity='0.6';}}
+                transition:'border-color 0.12s,color 0.12s',flexShrink:0,padding:0}}
+              onMouseEnter=${function(e){e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent)';}}
+              onMouseLeave=${function(e){e.currentTarget.style.borderColor='#333';e.currentTarget.style.color='#888';}}
               title='Add image'>
               <svg width='14' height='14' viewBox='0 0 24 24' fill='currentColor'><path d='M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z'/></svg>
             </button>`}
@@ -4286,13 +4286,13 @@ function CommentBox(props) {
         onKeyDown=${function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit(e);}}}
         autoFocus=${!!props.autoFocus}
         placeholder='Add a comment…' rows='1' maxlength='300'
-        style=${{flex:1,background:'#1a1a1a',border:'1px solid var(--accent-dim)',color:'#f1f1f1',
+        style=${{flex:1,background:'#1a1a1a',border:'1px solid #333',color:'#f1f1f1',
           padding:'6px 10px',fontSize:13,resize:'none',boxSizing:'border-box',borderRadius:0,
           fontFamily:"'Roboto',sans-serif",height:36,lineHeight:'22px',overflow:'hidden',outline:'none'}}
         onMouseEnter=${function(e){if(document.activeElement!==e.target)e.target.style.borderColor='var(--accent)';}}
-        onMouseLeave=${function(e){if(document.activeElement!==e.target)e.target.style.borderColor='var(--accent-dim)';}}
+        onMouseLeave=${function(e){if(document.activeElement!==e.target)e.target.style.borderColor='#333';}}
         onFocus=${function(e){e.target.style.borderColor='var(--accent)';}}
-        onBlur=${function(e){e.target.style.borderColor='var(--accent-dim)';}}
+        onBlur=${function(e){e.target.style.borderColor='#333';}}
         disabled=${posting}/>
       <div style=${{display:'flex',flexDirection:'column',alignItems:'center',gap:2,flexShrink:0}}>
         ${err?html`<span style=${{color:'#ff6666',fontSize:10,maxWidth:60,textAlign:'center',lineHeight:1.2}}>${err.slice(0,20)}</span>`:null}
@@ -5694,6 +5694,15 @@ function WatchPage(props) {
       if(_likedCtxRef.set) _likedCtxRef.set(function(prev){var n=new Set(prev);n.delete(displayPost.uri);return n;});
       const rkey = likeUri && likeUri.split('/').pop(); setLikeUri(null);
       if (rkey) await bskyDelete(sess,'app.bsky.feed.like',rkey);
+      // Also unlike all other series parts
+      if (isSeries && parts.length > 1) {
+        for (var _pi = 1; _pi < parts.length; _pi++) {
+          var _part = parts[_pi];
+          if (_part && _part.viewer && _part.viewer.like) {
+            bskyDelete(sess,'app.bsky.feed.like', _part.viewer.like.split('/').pop()).catch(function(){});
+          }
+        }
+      }
     } else {
       setLiked(true); setLikeCount(function(n){return n+1;});
       _likedUriSet.add(displayPost.uri);
@@ -8556,17 +8565,9 @@ function PlaylistsTab(props) {
   const mobileCols = loadMobileCols();
   const [contentSub, setContentSub] = useState(function(){return loadContentSub();});
   useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
-  const [plSort, setPlSort] = useState('default'); // 'default' | 'name' | 'count'
-  const playlists = (function(){
-    var arr = (props.playlists || []).slice();
-    if(plSort==='name') arr.sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
-    else if(plSort==='count') arr.sort(function(a,b){
-      var ca=getPlaylistLocalItems(a.uri).length||(a.listItemCount||0);
-      var cb=getPlaylistLocalItems(b.uri).length||(b.listItemCount||0);
-      return cb-ca;
-    });
-    return arr;
-  })();
+  var playlists = (props.playlists||[]).slice().sort(function(a,b){
+    return new Date(b.indexedAt||0) - new Date(a.indexedAt||0);
+  });
   const [plHov, setPlHov] = useState(-1);
   const [plMenuOpen, setPlMenuOpen] = useState(-1);
   const [plMenuPos, setPlMenuPos] = useState(null);
@@ -8649,6 +8650,7 @@ function PlaylistsTab(props) {
   // Playlist detail view
   if (props.playlistView) {
     const pl = props.playlistView;
+    var cs = props.contentSub || contentSub;
     return html`<div>
       ${sharePlaylist?html`<${SharePlaylistModal} playlist=${sharePlaylist} session=${props.session} onClose=${function(){setSharePlaylist(null);}}/>`:null}
       ${editingPlaylist?html`<div style=${{position:'fixed',inset:0,background:'rgba(0,0,0,0.75)',zIndex:2000,display:'flex',alignItems:'center',justifyContent:'center'}}
@@ -8715,9 +8717,6 @@ function PlaylistsTab(props) {
           </div>
         </div>
       </div>
-      <div style=${{display:'flex',gap:4,alignItems:'center',marginTop:8,marginBottom:4,justifyContent:'flex-end'}}>
-        ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';return html`<button key=${s} onClick=${dis?null:function(){setContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:!dis&&contentSub===s?'var(--accent)':'none',color:dis?'#3a3a3a':contentSub===s?'#000':'var(--accent)',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:dis?'not-allowed':'pointer',borderRadius:0,opacity:dis?0.45:contentSub===s?1:0.55}}>${s}</button>`;})}
-      </div>
       ${props.playlistVidsLoading?html`<div style=${{color:'#aaa',padding:20}}>Loading videos…</div>`:
         !props.playlistVids||!props.playlistVids.length?html`<div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'30vh',gap:12,color:'#aaa'}}>
           <svg width="48" height="48" viewBox="0 0 24 24" fill="#3f3f3f"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
@@ -8728,9 +8727,9 @@ function PlaylistsTab(props) {
             var plVids = props.playlistVids||[];
             var imgCols = loadGridSize('images', portrait?'portrait':'landscape');
             var imgItems = plVids.map(function(x){return {post:(x.post||x)};});
-            if (contentSub==='Videos') return html`<${VideoGrid} videos=${plVids} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} onRemovedFromPlaylist=${props.onRemovedFromPlaylist} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null}/>`;
-            if (contentSub==='Images') return html`<${PostImageGrid} items=${imgItems} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`;
-            if (contentSub==='Timeline') return html`<${ChannelPostsFeed} posts=${imgItems} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true}/>`;
+            if (cs==='Videos') return html`<${VideoGrid} videos=${plVids} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} onRemovedFromPlaylist=${props.onRemovedFromPlaylist} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null}/>`;
+            if (cs==='Images') return html`<${PostImageGrid} items=${imgItems} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`;
+            if (cs==='Timeline') return html`<${ChannelPostsFeed} posts=${imgItems} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true}/>`;
             // Hybrid
             var vidPosts = plVids.filter(function(x){return isVid(x.post||x);});
             var imgPosts = imgItems.filter(function(x){return getPostImages(x.post).length>0;});
@@ -8751,36 +8750,6 @@ function PlaylistsTab(props) {
 
   return html`<div>
     ${sharePlaylist?html`<${SharePlaylistModal} playlist=${sharePlaylist} session=${props.session} onClose=${function(){setSharePlaylist(null);}}/>`:null}
-    <div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:8,marginBottom:16}}>
-      <button onClick=${function(){if(playlists.length)setSharePlaylist(playlists[0]);}}
-        style=${{background:'none',border:'1px solid #3f3f3f',color:'#aaa',padding:'6px 12px',
-          fontSize:13,cursor:'pointer',display:'flex',alignItems:'center',gap:6,borderRadius:0}}
-        onMouseEnter=${function(e){e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent)';}}
-        onMouseLeave=${function(e){e.currentTarget.style.borderColor='#3f3f3f';e.currentTarget.style.color='#aaa';}}
-        title="Share a playlist">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
-        Share
-      </button>
-      <div style=${{position:'relative'}}>
-        <button onClick=${function(){setSortMenuOpen(function(o){return !o;});}}
-          style=${{background:'none',border:'1px solid #3f3f3f',color:'#aaa',padding:'6px 12px',
-            fontSize:13,cursor:'pointer',display:'flex',alignItems:'center',gap:6,borderRadius:0}}
-          onMouseEnter=${function(e){e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent)';}}
-          onMouseLeave=${function(e){e.currentTarget.style.borderColor='#3f3f3f';e.currentTarget.style.color='#aaa';}}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z"/></svg>
-          Sort: ${plSort==='default'?'Default':plSort==='name'?'Name':'Count'}
-        </button>
-        ${sortMenuOpen?html`<div style=${{position:'absolute',top:'calc(100% + 2px)',right:0,background:'#1a1a1a',
-          border:'1px solid var(--accent)',minWidth:160,zIndex:300,boxShadow:'0 4px 20px rgba(0,0,0,0.7)'}}>
-          ${['default','name','count'].map(function(s){return html`<button key=${s}
-            style=${{display:'block',width:'100%',padding:'9px 14px',background:plSort===s?'var(--accent-dim)':'none',border:'none',
-              borderLeft:plSort===s?'2px solid var(--accent)':'2px solid transparent',color:'var(--accent)',fontSize:13,cursor:'pointer',
-              textAlign:'left',fontFamily:'Roboto,sans-serif'}}
-            onClick=${function(){setPlSort(s);setSortMenuOpen(false);}}>
-            ${s==='default'?'Default':s==='name'?'By Name':'By Video Count'}
-          </button>`;})}</div>`:null}
-      </div>
-    </div>
     <div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat(auto-fill,minmax(280px,1fr))',gap:portrait?'16px 8px':'24px 16px'}}>
     ${playlists.map(function(pl,i){
       var cleanDesc=(pl.description||'').replace(/^RaccNet Playlist\n?/,'').trim();
@@ -10506,11 +10475,11 @@ function ChannelPage(props) {
               ${!isOwn&&sess&&d.viewer&&d.viewer.following&&d.viewer.followedBy?html`<span style=${{fontSize:13,fontWeight:600,color:'var(--accent)',border:'1px solid var(--accent)',padding:'2px 8px',letterSpacing:0.5}}>Friends</span>`:null}
             </h1>
             ${portrait
-              ?html`<div style=${{color:'#aaa',fontSize:'clamp(10px,2.8vw,12px)',lineHeight:1.5,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}><span style=${{color:'var(--accent)'}}>@${d.handle}</span></div>
+              ?html`<div style=${{color:'#aaa',fontSize:'clamp(10px,2.8vw,12px)',lineHeight:1.5,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>@${d.handle}</div>
                 <div style=${{color:'#aaa',fontSize:'clamp(10px,2.8vw,12px)',lineHeight:1.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
-                  <span style=${{color:'var(--accent)'}}>${fmt(d.followersCount||0)}</span> subscribers · <span style=${{color:'var(--accent)',cursor:'pointer'}} onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>${fmt(d.followsCount||0)} subscriptions</span> · <span style=${{color:'var(--accent)'}}>${channelVideos.length}</span> videos
+                  ${fmt(d.followersCount||0)} subscribers · <span style=${{color:'var(--accent)',cursor:'pointer'}} onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>${fmt(d.followsCount||0)} subscriptions</span> · ${channelVideos.length} videos
                 </div>`
-              :html`<div style=${{color:'#aaa',fontSize:14,whiteSpace:'nowrap',lineHeight:1.6}}><span style=${{color:'var(--accent)'}}>@${d.handle}</span> · <span style=${{color:'var(--accent)'}}>${fmt(d.followersCount||0)}</span> subscribers · <span style=${{color:'var(--accent)',cursor:'pointer'}} onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>${fmt(d.followsCount||0)} subscriptions</span> · <span style=${{color:'var(--accent)'}}>${channelVideos.length}</span> videos</div>`
+              :html`<div style=${{color:'#aaa',fontSize:14,whiteSpace:'nowrap',lineHeight:1.6}}>@${d.handle} · ${fmt(d.followersCount||0)} subscribers · <span style=${{color:'var(--accent)',cursor:'pointer'}} onClick=${function(){if(props.onSubFeed){props.onSubFeed(d.did,d.handle);}else{setShowFollowsList(true);if(!followsList&&!followsListLoading)loadFollowsList(d.did);}}}>${fmt(d.followsCount||0)} subscriptions</span> · ${channelVideos.length} videos</div>`
             }
             ${portrait?html`<div style=${{display:'flex',alignItems:'center',gap:6,marginTop:8}}>
               ${isOwn
@@ -10811,7 +10780,7 @@ function ChannelPage(props) {
                       outline:'none',width:Math.max(60,(tabEditName.length||4)*9)+'px',minWidth:60,maxWidth:160}}/>`
                   :html`<button onClick=${function(){openTab(t.id);}}
                     style=${{padding:portrait?'10px 8px':'12px 14px',background:'none',border:'none',
-                      color:'var(--accent)',opacity:isActive?1:0.4,fontSize:portrait?13:14,
+                      color:isActive?'var(--accent)':'#aaa',fontSize:portrait?13:14,
                       fontWeight:isActive?500:400,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>
                     ${dispName}
                   </button>`}
@@ -10829,7 +10798,7 @@ function ChannelPage(props) {
             if (showDMs) {
               tabEls = tabEls.concat(html`<button key="DMs" onClick=${function(){openTab('DMs');}}
                 style=${{padding:portrait?'10px 14px':'12px 20px',background:'none',border:'none',
-                  color:'var(--accent)',opacity:tab==='DMs'?1:0.4,fontSize:portrait?13:14,
+                  color:tab==='DMs'?'var(--accent)':'#aaa',fontSize:portrait?13:14,
                   fontWeight:tab==='DMs'?500:400,borderBottom:'3px solid '+(tab==='DMs'?'var(--accent)':'transparent'),
                   cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>DMs</button>`);
             }
@@ -10857,7 +10826,7 @@ function ChannelPage(props) {
         </div>
         ${(tab==='Content'||tab==='Reposts'||tab==='Likes'||(tab&&tab.startsWith('pl:'))||(tab==='Playlists'&&!!playlistView))?html`<div style=${{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap',marginRight:portrait?0:8,marginLeft:portrait?'auto':0,padding:portrait?'4px 4px':0}}>
           <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?(contentSub==='Images'?'images':'videos'):null} gridOrient=${portrait?'portrait':'landscape'} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
-          ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';return html`<button key=${s} onClick=${dis?null:function(){openContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:!dis&&contentSub===s?'var(--accent)':'none',color:dis?'#3a3a3a':contentSub===s?'#000':'var(--accent)',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:dis?'not-allowed':'pointer',borderRadius:0,opacity:dis?0.45:contentSub===s?1:0.55}}>${s}</button>`;})}
+          ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';return html`<button key=${s} onClick=${dis?null:function(){openContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:!dis&&contentSub===s?'var(--accent)':'none',color:dis?'#3a3a3a':contentSub===s?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:dis?'not-allowed':'pointer',borderRadius:0,opacity:dis?0.45:1}}>${s}</button>`;})}
         </div>`:null}
       </div>
     </div>
@@ -10946,6 +10915,7 @@ function ChannelPage(props) {
         onDeletePlaylist=${function(plUri){setChannelPlaylists(function(prev){return (prev||[]).filter(function(p){return p.uri!==plUri;});});}}
         onEditPlaylist=${function(plUri,newName,newDesc){setChannelPlaylists(function(prev){return (prev||[]).map(function(p){return p.uri===plUri?Object.assign({},p,{name:newName,description:'RaccNet Playlist\n'+newDesc}):p;});});if(playlistView&&playlistView.uri===plUri){setPlaylistView(function(pv){return pv?Object.assign({},pv,{name:newName,description:'RaccNet Playlist\n'+newDesc}):pv;});}}}
         onAddToChannelTabs=${isOwn?addPlaylistTab:null}
+        contentSub=${contentSub} openContentSub=${openContentSub}
         onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
       ${(function(){
         if(!tab||!tab.startsWith('pl:')) return null;
