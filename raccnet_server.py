@@ -562,6 +562,39 @@ function PostImageCell(props) {
     }
   }
 
+  async function removeFromPlaylistAndAT(plUri) {
+    clearPlaylistAtUri(plUri, p.uri);
+    if (!sess) return;
+    try {
+      var cursor = undefined;
+      var deleted = false;
+      while (!deleted) {
+        var url = AUTH_PROXY+'/com.atproto.repo.listRecords?repo='+encodeURIComponent(sess.did)+'&collection=raccnet.playlist.item&limit=100';
+        if (cursor) url += '&cursor='+encodeURIComponent(cursor);
+        var r = await api(url, {headers:{Authorization:'Bearer '+sess.accessJwt}});
+        if (!r.ok) break;
+        var d = await r.json();
+        var match = (d.records||[]).find(function(rec){
+          return rec.value && rec.value.listUri===plUri && rec.value.postUri===p.uri;
+        });
+        if (match) {
+          await api(AUTH_PROXY+'/com.atproto.repo.deleteRecord', {
+            method:'POST',
+            headers:{'Content-Type':'application/json','Authorization':'Bearer '+sess.accessJwt},
+            body: JSON.stringify({repo:sess.did, collection:'raccnet.playlist.item', rkey:match.uri.split('/').pop()})
+          });
+          deleted = true;
+        } else if (d.cursor) {
+          cursor = d.cursor;
+        } else {
+          break;
+        }
+      }
+    } catch(e) {}
+    setMenuOpen(false);
+    if (props.onRemovedFromPlaylist) props.onRemovedFromPlaylist(plUri, p.uri);
+  }
+
   async function openPlaylists(mode) {
     setMenuView(mode||'playlists');
     if (!sess) { setUserPlaylists([]); return; }
@@ -768,6 +801,12 @@ function PostImageCell(props) {
               onClick=${function(e){e.stopPropagation();openPlaylists('playlists');}}>
               Add to Playlist
             </button>
+            ${props.currentPlaylistUri?html`<button style=${menuOptStyle('rmcurpl')}
+              onMouseEnter=${function(){setOptHov('rmcurpl');}}
+              onMouseLeave=${function(){setOptHov('');}}
+              onClick=${function(e){e.stopPropagation();removeFromPlaylistAndAT(props.currentPlaylistUri);}}>
+              Remove from this Playlist
+            </button>`:null}
             ${sess?html`<button style=${menuOptStyle('setas')}
               onMouseEnter=${function(){setOptHov('setas');}} onMouseLeave=${function(){setOptHov('');}}
               onClick=${function(e){e.stopPropagation();setMenuView('setas');}}>
@@ -909,19 +948,20 @@ function PostImageCell(props) {
 // items: array of feed items ({post}) or plain post objects
 function PostImageGrid(props) {
   const [visible, setVisible] = useState(45);
-  const sentinelRef = useRef(null);
   const _likedUris = useContext(LikedUrisCtx);
 
-  // Infinite scroll sentinel
-  useEffect(function(){
-    var el = sentinelRef.current;
+  // Callback ref: re-attaches IntersectionObserver whenever the sentinel element mounts/unmounts
+  const sentinelRef = useCallback(function(el){
     if (!el) return;
     var obs = new IntersectionObserver(function(entries){
-      if (entries[0].isIntersecting) setVisible(function(v){ return v + 45; });
+      if (!entries[0].isIntersecting) return;
+      // First exhaust locally-fetched items, then ask parent for more
+      setVisible(function(v){ return v + 45; });
+      if (props.onLoadMoreAPI) props.onLoadMoreAPI();
     }, {rootMargin:'300px'});
     obs.observe(el);
-    return function(){ obs.disconnect(); };
-  }, [sentinelRef.current]);
+    // No cleanup needed — element is replaced each render cycle only when hasMore changes
+  }, [props.onLoadMoreAPI]);
 
   var cols = props.cols || 6;
   var allItems = (props.items||[]).filter(function(x){ var p=x.post||x; return isImagePost(p); });
@@ -949,7 +989,8 @@ function PostImageGrid(props) {
     }
   }
   var visItems = allItems.slice(0, visible);
-  var hasMore  = visible < allItems.length;
+  var hasMoreLocal = visible < allItems.length;
+  var hasMore = hasMoreLocal || !!props.hasMoreFromAPI;
 
   return html`<div>
     ${(props.loading&&!allItems.length)?html`<div style=${{display:'grid',gridTemplateColumns:'repeat('+cols+',1fr)',gap:3}}>
@@ -963,10 +1004,10 @@ function PostImageGrid(props) {
         ${visItems.map(function(x,i){
           var p=x.post||x;
           var gridPosts = allItems.map(function(x){return x.post||x;});
-          return html`<${PostImageCell} key=${p.uri||i} post=${p} session=${props.session||null} onChannel=${props.onChannel||null} gridItems=${gridPosts} gridIdx=${i}/>`;
+          return html`<${PostImageCell} key=${p.uri||i} post=${p} session=${props.session||null} onChannel=${props.onChannel||null} gridItems=${gridPosts} gridIdx=${i} currentPlaylistUri=${props.currentPlaylistUri||null} onRemovedFromPlaylist=${props.onRemovedFromPlaylist||null}/>`;
         })}
       </div>
-      ${hasMore?html`<div ref=${sentinelRef} style=${{height:1}}/>`:null}
+      ${hasMore&&!props.loading?html`<div ref=${sentinelRef} style=${{height:1}}/>`:null}
       ${props.loading?html`<${RaccNetLoadingIndicator} label="Loading images"/>`:null}
     </div>`:null}
   </div>`;
@@ -3698,7 +3739,7 @@ function FeedPage(props) {
       </div>
     </div>
     ${contentSub==='Videos'?html`<${VideoGrid} videos=${feedVideos} loading=${feedLoading} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} setHideHistory=${setHideHistory} hasMoreFromAPI=${!!feedCursor} onLoadMoreAPI=${loadMoreItems} gridCols=${vidCols} _tick=${gridSizeTick}/>`:null}
-    ${contentSub==='Images'?html`<${PostImageGrid} items=${feedAllItems} cols=${imgCols} loading=${feedLoading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`:null}
+    ${contentSub==='Images'?html`<${PostImageGrid} items=${feedAllItems} cols=${imgCols} loading=${feedLoading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session} hasMoreFromAPI=${!!feedCursor} onLoadMoreAPI=${loadMoreItems}/>`:null}
     ${contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${feedAllItems} loading=${feedLoading} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey=${'feedTimeline'} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
     ${contentSub==='Hybrid'?html`<div>${(function(){
       var vidItems=feedVideos.map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
@@ -8728,14 +8769,14 @@ function PlaylistsTab(props) {
             var imgCols = loadGridSize('images', portrait?'portrait':'landscape');
             var imgItems = plVids.map(function(x){return {post:(x.post||x)};});
             if (cs==='Videos') return html`<${VideoGrid} videos=${plVids} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} onRemovedFromPlaylist=${props.onRemovedFromPlaylist} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null}/>`;
-            if (cs==='Images') return html`<${PostImageGrid} items=${imgItems} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`;
+            if (cs==='Images') return html`<${PostImageGrid} items=${imgItems} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null} onRemovedFromPlaylist=${props.onRemovedFromPlaylist||null}/>`;
             if (cs==='Timeline') return html`<${ChannelPostsFeed} posts=${imgItems} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true}/>`;
             // Hybrid
             var vidPosts = plVids.filter(function(x){return isVid(x.post||x);});
             var imgPosts = imgItems.filter(function(x){return getPostImages(x.post).length>0;});
             return html`<div>
               ${vidPosts.length>0?html`<${VideoGrid} videos=${vidPosts} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} onRemovedFromPlaylist=${props.onRemovedFromPlaylist} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null}/>`:null}
-              ${imgPosts.length>0?html`<div style=${{marginTop:24}}><${PostImageGrid} items=${imgPosts} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/></div>`:null}
+              ${imgPosts.length>0?html`<div style=${{marginTop:24}}><${PostImageGrid} items=${imgPosts} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session} currentPlaylistUri=${props.playlistView&&props.playlistView.uri||null} onRemovedFromPlaylist=${props.onRemovedFromPlaylist||null}/></div>`:null}
             </div>`;
           })()}
         </div>`}
