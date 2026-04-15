@@ -11083,7 +11083,7 @@ function restoreScrollPos(key) {
 // ── RateLimitPage ─────────────────────────────────────────────────────────────
 function RateLimitPage() {
   return html`<div style=${{minHeight:'100vh',background:'#0f0f0f',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:32,padding:24,textAlign:'center'}}>
-    <img src="/raccnet-icon.png" alt="RaccNet" style=${{width:120,height:120,objectFit:'contain'}}/>
+    <img src=${_RACC_LOGO} alt="RaccNet" style=${{width:120,height:120,objectFit:'contain'}}/>
     <div>
       <h1 style=${{color:'var(--accent)',fontSize:28,fontWeight:800,marginBottom:12}}>Rate Limited</h1>
       <p style=${{color:'#aaa',fontSize:16,maxWidth:480,lineHeight:1.6,margin:'0 auto'}}>
@@ -11101,7 +11101,7 @@ function RateLimitPage() {
 // ── LoginGatePage ─────────────────────────────────────────────────────────────
 function LoginGatePage(props) {
   return html`<div style=${{minHeight:'100vh',background:'#0f0f0f',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:24,padding:24,textAlign:'center'}}>
-    <img src="/raccnet-icon.png" alt="RaccNet" style=${{width:120,height:120,objectFit:'contain'}}/>
+    <img src=${_RACC_LOGO} alt="RaccNet" style=${{width:120,height:120,objectFit:'contain'}}/>
     <div>
       <h1 style=${{color:'var(--accent)',fontSize:32,fontWeight:800,letterSpacing:-1,marginBottom:8}}>RaccNet</h1>
       <p style=${{color:'#888',fontSize:14,marginBottom:4,fontStyle:'italic'}}>⚠ Work in progress — not finished</p>
@@ -11121,17 +11121,42 @@ function LoginGatePage(props) {
   </div>`;
 }
 
+// ── CrashOverlay ─────────────────────────────────────────────────────────────
+const _RACC_LOGO = 'data:image/png;base64,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';
+function CrashOverlay() {
+  return html`<div style=${{position:'fixed',inset:0,background:'#0f0f0f',zIndex:99999,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:20,padding:24,textAlign:'center'}}>
+    <div style=${{width:100,height:100,flexShrink:0,background:'var(--accent)',WebkitMaskImage:'url('+_RACC_LOGO+')',maskImage:'url('+_RACC_LOGO+')',WebkitMaskSize:'contain',maskSize:'contain',WebkitMaskRepeat:'no-repeat',maskRepeat:'no-repeat',WebkitMaskPosition:'center',maskPosition:'center'}}></div>
+    <h1 style=${{color:'var(--accent)',fontSize:30,fontWeight:800,letterSpacing:-0.5}}>RaccNet Crashed</h1>
+    <p style=${{color:'#888',fontSize:15,maxWidth:440,lineHeight:1.7,margin:'0 auto'}}>
+      Your local RaccNet server either crashed or was closed. You need to reopen it and reload for it to work again.
+    </p>
+    <button onClick=${function(){ window.location.reload(); }}
+      style=${{marginTop:4,padding:'11px 36px',background:'var(--accent-solid-dim)',color:'var(--accent)',border:'1px solid var(--accent)',fontSize:14,fontWeight:700,cursor:'pointer',borderRadius:0,letterSpacing:0.5}}
+      onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)'}}
+      onMouseLeave=${function(e){e.currentTarget.style.background='var(--accent-solid-dim)';}}>
+      Reload
+    </button>
+  </div>`;
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 function App() {
   // Apply saved settings on mount
   useEffect(function(){
     applyAccent(loadAccent());
   },[]);
+  const [crashed, setCrashed] = useState(false);
+  const _kaFails = useRef(0);
   // Keepalive — tell server we're still open so it can shut down when browser closes
   useEffect(function(){
     var _kaInterval = setInterval(function(){
-      fetch('/api/keepalive', {method:'POST'}).catch(function(){});
-    }, 5000);
+      fetch('/api/keepalive', {method:'POST'})
+        .then(function(){ _kaFails.current = 0; })
+        .catch(function(){
+          _kaFails.current++;
+          if(_kaFails.current >= 1) setCrashed(true);
+        });
+    }, 1000);
     function _kaBeforeUnload(){
       navigator.sendBeacon('/api/keepalive');
     }
@@ -12112,6 +12137,7 @@ function App() {
     return null;
   }
 
+  if (crashed) return html`<${CrashOverlay}/>`;
   if (rateLimited) return html`<${RateLimitPage}/>`;
   if (sessionLoaded && !session) return html`<${LoginGatePage} onLogin=${function(){setShowLogin(true);}}/>
     ${showLogin?html`<${LoginModal} onClose=${function(){setShowLogin(false);}} onSuccess=${handleLoginSuccess}/>`:null}`;
