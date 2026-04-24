@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SkyTube</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin="anonymous"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { background: #0f0f0f; color: #f1f1f1; font-family: 'Roboto', sans-serif; overflow-x: hidden; }
+  /* Chrome scrollbars */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #3f3f3f; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #555; }
+  /* Firefox scrollbars */
+  * { scrollbar-width: thin; scrollbar-color: #3f3f3f transparent; }
+  /* Shimmer */
+  @keyframes shimmer { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .skt-shimmer { animation: shimmer 1.5s ease-in-out infinite; }
+  /* Line clamp */
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    max-height: 2.8em;
+    line-height: 1.4em;
+  }
+  /* Remove Firefox default button/input appearance */
+  button { -moz-appearance: none; cursor: pointer; }
+  input  { -moz-appearance: none; }
+  a { color: inherit; text-decoration: none; }
+  button:focus, input:focus, video:focus { outline: none; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const PUB  = "https://public.api.bsky.app/xrpc";
+const AUTH = "https://bsky.social/xrpc";
+
+const isVid = (p) => p?.embed?.$type === "app.bsky.embed.video#view";
+
+const ago = (d) => {
+  const s = Math.floor((Date.now() - new Date(d)) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 2592000) return `${Math.floor(s / 86400)}d ago`;
+  if (s < 31536000) return `${Math.floor(s / 2592000)} months ago`;
+  return `${Math.floor(s / 31536000)} years ago`;
+};
+
+const fmt = (n) => {
+  if (!n) return "0";
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return "" + n;
+};
+
+// ── Icons ──────────────────────────────────────────────────────────────────────
+const Icon = {
+  Home: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>,
+  Search: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>,
+  Menu: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>,
+  Explore: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>,
+  Feed: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>,
+  People: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>,
+  Like: () => <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.73v-2z"/></svg>,
+  Share: () => <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>,
+  User: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/></svg>,
+  Play: () => <svg width="48" height="48" viewBox="0 0 24 24" fill="rgba(255,255,255,0.8)"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>,
+};
+
+// ── Video Player ───────────────────────────────────────────────────────────────
+function VideoPlayer({ playlist, thumbnail }) {
+  const ref = useRef();
+  const hlsRef = useRef();
+  const scriptLoaded = useRef(false);
+
+  useEffect(() => {
+    if (!playlist || !ref.current) return;
+
+    const initHls = () => {
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      if (window.Hls && window.Hls.isSupported()) {
+        const hls = new window.Hls({ enableWorker: false, lowLatencyMode: false, backBufferLength: 90 });
+        hlsRef.current = hls;
+        hls.loadSource(playlist);
+        hls.attachMedia(ref.current);
+        hls.on(window.Hls.Events.MANIFEST_PARSED, () => { ref.current && ref.current.play().catch(() => {}); });
+        hls.on(window.Hls.Events.ERROR, (_, data) => { if (data.fatal) ref.current.src = playlist; });
+      } else if (ref.current.canPlayType("application/vnd.apple.mpegurl")) {
+        ref.current.src = playlist;
+        ref.current.play().catch(() => {});
+      } else {
+        ref.current.src = playlist;
+      }
+    };
+
+    if (window.Hls) {
+      initHls();
+    } else if (!scriptLoaded.current) {
+      scriptLoaded.current = true;
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js";
+      s.crossOrigin = "anonymous";
+      s.onload = initHls;
+      s.onerror = () => { if (ref.current) ref.current.src = playlist; };
+      document.head.appendChild(s);
+    }
+
+    return () => { hlsRef.current && hlsRef.current.destroy(); };
+  }, [playlist]);
+
+  return (
+    <video
+      ref={ref}
+      controls
+      poster={thumbnail}
+      style={{ width: "100%", background: "#000", display: "block", maxHeight: "75vh", minHeight: "300px" }}
+    />
+  );
+}
+
+// ── Avatar ─────────────────────────────────────────────────────────────────────
+function Avatar({ src, size = 36, onClick }) {
+  const [err, setErr] = useState(false);
+  const initials = "?";
+  const s = { width: size, height: size, borderRadius: "50%", flexShrink: 0, overflow: "hidden", background: "#3f3f3f", cursor: onClick ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.4, color: "#aaa", fontWeight: 600 };
+  return (
+    <div style={s} onClick={onClick}>
+      {src && !err
+        ? <img src={src} alt="" onError={() => setErr(true)} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+        : initials
+      }
+    </div>
+  );
+}
+
+// ── Thumbnail ──────────────────────────────────────────────────────────────────
+function Thumb({ src, style: extra = {} }) {
+  const [err, setErr] = useState(false);
+  return (
+    <div style={{ width: "100%", height: "100%", ...extra, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      {src && !err
+        ? <img src={src} alt="" onError={() => setErr(true)} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+        : <Icon.Play />
+      }
+    </div>
+  );
+}
+
+// ── Skeleton ───────────────────────────────────────────────────────────────────
+function SkeletonCard() {
+  const shimBox = (style) => <div className="skt-shimmer" style={{ background: "#272727", borderRadius: 4, ...style }} />;
+  return (
+    <div>
+      {shimBox({ width: "100%", paddingBottom: "56.25%", borderRadius: 12 })}
+      <div style={{ display: "flex", gap: 12, paddingTop: 12 }}>
+        {shimBox({ width: 36, height: 36, borderRadius: "50%", flexShrink: 0 })}
+        <div style={{ flex: 1 }}>
+          {shimBox({ height: 14, marginBottom: 8, width: "90%" })}
+          {shimBox({ height: 12, width: "60%" })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Video Card (grid) ──────────────────────────────────────────────────────────
+function VideoCard({ post, onWatch, onChannel }) {
+  const embed = post && post.embed;
+  const author = post && post.author;
+  const rec = post && post.record;
+  if (!embed || embed.$type !== "app.bsky.embed.video#view") return null;
+
+  return (
+    <div style={{ cursor: "pointer" }} onClick={() => onWatch(post)}>
+      <div style={{ width: "100%", paddingBottom: "56.25%", borderRadius: 12, overflow: "hidden", background: "#1a1a1a", position: "relative" }}>
+        <div style={{ position: "absolute", inset: 0 }}>
+          <Thumb src={embed.thumbnail} />
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 12, paddingTop: 12 }}>
+        <Avatar src={author.avatar} onClick={(e) => { e && e.stopPropagation && e.stopPropagation(); onChannel(author.handle); }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="line-clamp-2" style={{ fontSize: 14, fontWeight: 500, color: "#f1f1f1" }}>
+            {(rec && rec.text) || "Untitled video"}
+          </div>
+          <div
+            onClick={(e) => { e.stopPropagation(); onChannel(author.handle); }}
+            style={{ fontSize: 13, color: "#aaa", marginTop: 4 }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = "#f1f1f1")}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "#aaa")}
+          >
+            {author.displayName || author.handle}
+          </div>
+          <div style={{ fontSize: 13, color: "#aaa" }}>{fmt(post.likeCount || 0)} likes • {ago(post.indexedAt)}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Video Card (compact / sidebar) ─────────────────────────────────────────────
+function VideoCardCompact({ post, onWatch, onChannel }) {
+  const embed = post && post.embed;
+  const author = post && post.author;
+  const rec = post && post.record;
+  if (!embed || embed.$type !== "app.bsky.embed.video#view") return null;
+
+  return (
+    <div
+      onClick={() => onWatch(post)}
+      style={{ display: "flex", gap: 8, cursor: "pointer", padding: "8px 0" }}
+      onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.8")}
+      onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+    >
+      <div style={{ width: 168, flexShrink: 0, borderRadius: 8, overflow: "hidden", background: "#272727", aspectRatio: "16/9", position: "relative" }}>
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}>
+          <Thumb src={embed.thumbnail} />
+        </div>
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="line-clamp-2" style={{ fontSize: 13, fontWeight: 500, color: "#f1f1f1" }}>
+          {(rec && rec.text) || "Untitled video"}
+        </div>
+        <div
+          onClick={(e) => { e.stopPropagation(); onChannel(author.handle); }}
+          style={{ fontSize: 12, color: "#aaa", marginTop: 4 }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = "#f1f1f1")}
+          onMouseLeave={(e) => (e.currentTarget.style.color = "#aaa")}
+        >
+          {author.displayName || author.handle}
+        </div>
+        <div style={{ fontSize: 12, color: "#aaa" }}>{fmt(post.likeCount || 0)} likes • {ago(post.indexedAt)}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Header ─────────────────────────────────────────────────────────────────────
+function Header({ onHome, onSearch, session, onLogin, onLogout, input, setInput, toggleSidebar }) {
+  const submit = (e) => {
+    e.preventDefault();
+    if (input.trim()) onSearch(input.trim());
+  };
+
+  return (
+    <header style={{
+      position: "fixed", top: 0, left: 0, right: 0, height: 56,
+      background: "#0f0f0f", display: "flex", alignItems: "center",
+      padding: "0 16px", gap: 16, zIndex: 200, borderBottom: "1px solid #272727"
+    }}>
+      {/* Hamburger + Logo */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+        <button
+          onClick={toggleSidebar}
+          style={{ background: "none", border: "none", color: "#f1f1f1", padding: 8, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center" }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "#272727")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+        ><Icon.Menu /></button>
+
+        <div onClick={onHome} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", userSelect: "none" }}>
+          <div style={{ width: 34, height: 24, background: "#FF0000", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg width="18" height="14" viewBox="0 0 18 14" fill="none">
+              <polygon points="5,1 5,13 15,7" fill="white" />
+            </svg>
+          </div>
+          <span style={{ fontSize: 20, fontWeight: 700, color: "#f1f1f1", letterSpacing: -0.5 }}>
+            Sky<span style={{ color: "#aaa", fontWeight: 400 }}>Tube</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Search */}
+      <div style={{ flex: 1, display: "flex", justifyContent: "center" }}>
+        <form onSubmit={submit} style={{ display: "flex", width: "100%", maxWidth: 600 }}>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Search"
+            style={{
+              flex: 1, height: 40, border: "1px solid #3f3f3f", borderRight: "none",
+              borderRadius: "40px 0 0 40px", background: "#121212", color: "#f1f1f1",
+              padding: "0 16px", fontSize: 16
+            }}
+            onFocus={(e) => (e.target.style.borderColor = "#1c62b9")}
+            onBlur={(e) => (e.target.style.borderColor = "#3f3f3f")}
+          />
+          <button
+            type="submit"
+            style={{
+              width: 64, height: 40, background: "#272727", border: "1px solid #3f3f3f",
+              borderLeft: "none", borderRadius: "0 40px 40px 0",
+              color: "#f1f1f1", display: "flex", alignItems: "center", justifyContent: "center"
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "#3f3f3f")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "#272727")}
+          ><Icon.Search /></button>
+        </form>
+      </div>
+
+      {/* Auth */}
+      <div style={{ flexShrink: 0 }}>
+        {session ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <Avatar src={session.avatar} size={32} />
+            <button
+              onClick={onLogout}
+              style={{ background: "none", border: "1px solid #3f3f3f", color: "#f1f1f1", padding: "6px 12px", borderRadius: 4, fontSize: 13 }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "#272727")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+            >Sign out</button>
+          </div>
+        ) : (
+          <button
+            onClick={onLogin}
+            style={{
+              display: "flex", alignItems: "center", gap: 8, background: "none",
+              border: "1px solid #3f3f3f", color: "#3ea6ff", padding: "6px 16px",
+              borderRadius: 20, fontSize: 14, fontWeight: 500
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(62,166,255,0.1)")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+          ><Icon.User /> Sign in</button>
+        )}
+      </div>
+    </header>
+  );
+}
+
+// ── Sidebar ────────────────────────────────────────────────────────────────────
+function Sidebar({ open, page, onHome, onExplore, onFeed, onSubscriptions, hasSession }) {
+  const Item = ({ icon, label, active, onClick }) => (
+    <button
+      onClick={onClick}
+      title={!open ? label : ""}
+      style={{
+        display: "flex", alignItems: "center", gap: open ? 24 : 0,
+        padding: open ? "10px 12px" : "18px 0", width: "100%",
+        background: active ? "#272727" : "none", border: "none",
+        color: "#f1f1f1", borderRadius: 10,
+        justifyContent: open ? "flex-start" : "center",
+        fontSize: 14, fontWeight: active ? 500 : 400,
+        transition: "background 0.1s"
+      }}
+      onMouseEnter={(e) => !active && (e.currentTarget.style.background = "#272727")}
+      onMouseLeave={(e) => !active && (e.currentTarget.style.background = "none")}
+    >
+      {icon}
+      {open && <span>{label}</span>}
+    </button>
+  );
+
+  return (
+    <aside style={{
+      position: "fixed", top: 56, left: 0, bottom: 0,
+      width: open ? 240 : 72, background: "#0f0f0f",
+      padding: open ? "12px" : "12px 4px",
+      overflowY: "auto", overflowX: "hidden", zIndex: 100,
+      transition: "width 0.15s ease", boxSizing: "border-box"
+    }}>
+      <Item icon={<Icon.Home />}   label="Home"          active={page === "home"}   onClick={onHome} />
+      <Item icon={<Icon.Explore />} label="Explore"      active={page === "search"} onClick={() => onExplore("video")} />
+      <Item icon={<Icon.Feed />}   label="Feed"          active={page === "feed"}   onClick={onFeed} />
+      {hasSession && <>
+        <div style={{ height: 1, background: "#272727", margin: "8px 0" }} />
+        <Item icon={<Icon.People />} label="Subscriptions" active={page === "subs"} onClick={onSubscriptions} />
+      </>}
+      {open && <>
+        <div style={{ height: 1, background: "#272727", margin: "12px 0" }} />
+        <div style={{ padding: "4px 12px" }}>
+          <div style={{ color: "#aaa", fontSize: 12, marginBottom: 6 }}>Powered by</div>
+          <a href="https://bsky.app" target="_blank" rel="noreferrer" style={{ color: "#3ea6ff", fontSize: 12 }}>Bluesky AT Protocol</a>
+        </div>
+      </>}
+    </aside>
+  );
+}
+
+// ── Login Modal ────────────────────────────────────────────────────────────────
+function LoginModal({ onClose, onSuccess }) {
+  const [handle, setHandle]   = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError]     = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setLoading(true); setError("");
+    try {
+      const res  = await fetch(`${AUTH}/com.atproto.server.createSession`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: handle.trim(), password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Login failed");
+      onSuccess(data);
+    } catch (err) {
+      setError(err.message || "An error occurred. Please try again.");
+    }
+    setLoading(false);
+  };
+
+  const inputStyle = {
+    width: "100%", padding: "10px 14px", background: "#121212",
+    border: "1px solid #3f3f3f", borderRadius: 6, color: "#f1f1f1",
+    fontSize: 14, boxSizing: "border-box"
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: "#212121", borderRadius: 12, padding: 32, width: 420, maxWidth: "90vw", boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <div style={{ width: 28, height: 20, background: "#FF0000", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg width="14" height="10" viewBox="0 0 14 10" fill="none"><polygon points="4,1 4,9 11,5" fill="white"/></svg>
+          </div>
+          <h2 style={{ color: "#f1f1f1", fontSize: 20, fontWeight: 600 }}>Sign in to SkyTube</h2>
+        </div>
+        <p style={{ color: "#aaa", fontSize: 13, marginBottom: 24 }}>Connect your Bluesky account for a personalized video feed.</p>
+
+        <form onSubmit={submit}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", color: "#aaa", fontSize: 13, marginBottom: 6 }}>Handle or Email</label>
+            <input
+              value={handle} onChange={(e) => setHandle(e.target.value)}
+              placeholder="you.bsky.social" style={inputStyle}
+              onFocus={(e) => (e.target.style.borderColor = "#1c62b9")}
+              onBlur={(e) => (e.target.style.borderColor = "#3f3f3f")}
+            />
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ display: "block", color: "#aaa", fontSize: 13, marginBottom: 6 }}>App Password</label>
+            <input
+              value={password} onChange={(e) => setPassword(e.target.value)}
+              type="password" placeholder="xxxx-xxxx-xxxx-xxxx" style={inputStyle}
+              onFocus={(e) => (e.target.style.borderColor = "#1c62b9")}
+              onBlur={(e) => (e.target.style.borderColor = "#3f3f3f")}
+            />
+          </div>
+          <p style={{ color: "#aaa", fontSize: 12, marginBottom: 20 }}>
+            Create an App Password at Bluesky → Settings → Privacy & Security → App Passwords
+          </p>
+          {error && <div style={{ color: "#ff4444", fontSize: 13, marginBottom: 12 }}>{error}</div>}
+          <button
+            type="submit"
+            disabled={loading || !handle || !password}
+            style={{
+              width: "100%", padding: 12, background: "#ff0000", color: "#fff",
+              border: "none", borderRadius: 6, fontSize: 15, fontWeight: 600,
+              opacity: (loading || !handle || !password) ? 0.6 : 1, transition: "opacity 0.15s"
+            }}
+          >{loading ? "Signing in..." : "Sign In"}</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Grid ───────────────────────────────────────────────────────────────────────
+function VideoGrid({ videos, loading, onWatch, onChannel }) {
+  if (loading) return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: "24px 16px" }}>
+      {Array(12).fill(0).map((_, i) => <SkeletonCard key={i} />)}
+    </div>
+  );
+  if (videos.length === 0) return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "40vh", gap: 16, color: "#aaa" }}>
+      <Icon.Play />
+      <p style={{ fontSize: 16 }}>No videos found.</p>
+    </div>
+  );
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: "24px 16px" }}>
+      {videos.map((post, i) => <VideoCard key={post.uri || i} post={post} onWatch={onWatch} onChannel={onChannel} />)}
+    </div>
+  );
+}
+
+// ── Home Page ──────────────────────────────────────────────────────────────────
+const CHIPS = ["All", "Gaming", "Music", "Tech", "Art", "Vlogs", "News", "Funny"];
+
+function HomePage({ videos, loading, onWatch, onChannel, onExplore }) {
+  const [active, setActive] = useState("All");
+  return (
+    <div style={{ padding: 24 }}>
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", marginBottom: 24, paddingBottom: 4 }}>
+        {CHIPS.map((chip) => (
+          <button key={chip}
+            onClick={() => { setActive(chip); chip !== "All" && onExplore(chip); }}
+            style={{
+              flexShrink: 0, padding: "6px 12px", borderRadius: 8,
+              background: active === chip ? "#f1f1f1" : "#272727",
+              color: active === chip ? "#0f0f0f" : "#f1f1f1",
+              border: "none", fontSize: 14, fontWeight: active === chip ? 500 : 400
+            }}
+          >{chip}</button>
+        ))}
+      </div>
+      <VideoGrid videos={videos} loading={loading} onWatch={onWatch} onChannel={onChannel} />
+    </div>
+  );
+}
+
+// ── Watch Page ─────────────────────────────────────────────────────────────────
+function WatchPage({ post, related, thread, onWatch, onChannel }) {
+  const embed  = post.embed;
+  const author = post.author;
+  const rec    = post.record;
+  const replies = ((thread && thread.replies) || []).filter((r) => r.post);
+
+  const btnStyle = {
+    background: "#272727", border: "none", color: "#f1f1f1",
+    padding: "8px 16px", borderRadius: 20, fontSize: 14,
+    display: "flex", alignItems: "center", gap: 6
+  };
+
+  return (
+    <div style={{ display: "flex", gap: 24, padding: 24, maxWidth: 1600, margin: "0 auto" }}>
+      {/* Main column */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ borderRadius: 12, overflow: "hidden", background: "#000" }}>
+          <VideoPlayer playlist={embed.playlist} thumbnail={embed.thumbnail} />
+        </div>
+
+        <h1 style={{ fontSize: 18, fontWeight: 600, color: "#f1f1f1", margin: "16px 0 8px", lineHeight: 1.4 }}>
+          {(rec && rec.text && rec.text.split("\n")[0]) || "Video from Bluesky"}
+        </h1>
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }} onClick={() => onChannel(author.handle)}>
+            <Avatar src={author.avatar} size={40} />
+            <div>
+              <div style={{ color: "#f1f1f1", fontWeight: 500, fontSize: 14 }}>{author.displayName || author.handle}</div>
+              <div style={{ color: "#aaa", fontSize: 12 }}>@{author.handle}</div>
+            </div>
+            <button
+              style={{ background: "#f1f1f1", border: "none", color: "#0f0f0f", padding: "8px 16px", borderRadius: 20, fontWeight: 600, fontSize: 13, marginLeft: 8 }}
+              onClick={(e) => e.stopPropagation()}
+            >Follow</button>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={btnStyle}><Icon.Like /> {fmt(post.likeCount || 0)}</button>
+            <button style={btnStyle}><Icon.Share /> Share</button>
+          </div>
+        </div>
+
+        <div style={{ background: "#212121", borderRadius: 12, padding: "12px 16px", marginBottom: 24 }}>
+          <div style={{ fontSize: 13, color: "#f1f1f1", fontWeight: 500, marginBottom: 4 }}>
+            {fmt(post.likeCount || 0)} likes • {fmt(post.replyCount || 0)} comments • {fmt(post.repostCount || 0)} reposts • {ago(post.indexedAt)}
+          </div>
+          {rec && rec.text && (
+            <div style={{ fontSize: 14, color: "#f1f1f1", marginTop: 8, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{rec.text}</div>
+          )}
+          {embed.alt && embed.alt !== (rec && rec.text) && (
+            <div style={{ fontSize: 13, color: "#aaa", marginTop: 8, fontStyle: "italic" }}>{embed.alt}</div>
+          )}
+          <a href={`https://bsky.app/profile/${author.handle}/post/${post.uri.split("/").pop()}`}
+            target="_blank" rel="noreferrer"
+            style={{ display: "inline-block", marginTop: 12, color: "#3ea6ff", fontSize: 13 }}
+          >View on Bluesky →</a>
+        </div>
+
+        {/* Comments */}
+        <div>
+          <h3 style={{ color: "#f1f1f1", fontSize: 16, fontWeight: 600, marginBottom: 16 }}>{fmt(post.replyCount || 0)} Comments</h3>
+          {replies.length === 0
+            ? <div style={{ color: "#aaa", fontSize: 14 }}>No comments yet.</div>
+            : replies.slice(0, 20).map((r, i) => {
+                const rp = r.post;
+                return (
+                  <div key={i} style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+                    <Avatar src={rp.author.avatar} size={32} />
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 500, color: "#f1f1f1" }}>
+                        {rp.author.displayName || rp.author.handle}{" "}
+                        <span style={{ color: "#aaa", fontWeight: 400 }}>{ago(rp.indexedAt)}</span>
+                      </div>
+                      <div style={{ fontSize: 14, color: "#f1f1f1", marginTop: 4, lineHeight: 1.5 }}>{rp.record && rp.record.text}</div>
+                      <div style={{ display: "flex", gap: 12, marginTop: 6 }}>
+                        <button style={{ background: "none", border: "none", color: "#aaa", fontSize: 12, display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
+                          <Icon.Like /> {fmt(rp.likeCount || 0)}
+                        </button>
+                        <button style={{ background: "none", border: "none", color: "#aaa", fontSize: 12, padding: 0 }}>Reply</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+          }
+        </div>
+      </div>
+
+      {/* Related sidebar */}
+      <div style={{ width: 402, flexShrink: 0 }}>
+        <h3 style={{ color: "#f1f1f1", fontSize: 15, fontWeight: 600, marginBottom: 12 }}>More from this channel</h3>
+        {related.length === 0
+          ? <div style={{ color: "#aaa", fontSize: 14 }}>No related videos.</div>
+          : related.map((p, i) => <VideoCardCompact key={p.uri || i} post={p} onWatch={onWatch} onChannel={onChannel} />)
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── Channel Page ───────────────────────────────────────────────────────────────
+function ChannelPage({ data, videos, loading, onWatch, onChannel }) {
+  const [tab, setTab] = useState("Videos");
+
+  if (loading) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "50vh", color: "#aaa" }}>
+      Loading channel...
+    </div>
+  );
+  if (!data) return null;
+
+  return (
+    <div>
+      <div style={{ height: 160, background: data.banner ? `url(${data.banner}) center/cover` : "linear-gradient(135deg,#1a1a2e,#0f3460)" }} />
+      <div style={{ padding: "0 24px", borderBottom: "1px solid #272727" }}>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 24, paddingBottom: 24, marginTop: -24 }}>
+          <Avatar src={data.avatar} size={80} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1 style={{ color: "#f1f1f1", fontSize: 24, fontWeight: 700, marginBottom: 4 }}>{data.displayName || data.handle}</h1>
+            <div style={{ color: "#aaa", fontSize: 14 }}>@{data.handle} • {fmt(data.followersCount || 0)} followers • {videos.length} videos</div>
+            {data.description && (
+              <div style={{ color: "#aaa", fontSize: 13, marginTop: 6, maxWidth: 600, whiteSpace: "pre-wrap" }}>
+                {data.description.slice(0, 200)}{data.description.length > 200 ? "…" : ""}
+              </div>
+            )}
+          </div>
+          <button style={{ flexShrink: 0, background: "#f1f1f1", border: "none", color: "#0f0f0f", padding: "10px 20px", borderRadius: 20, fontWeight: 600, fontSize: 14 }}>
+            Follow
+          </button>
+        </div>
+
+        <div style={{ display: "flex" }}>
+          {["Videos", "About"].map((t) => (
+            <button key={t} onClick={() => setTab(t)} style={{
+              padding: "12px 20px", background: "none", border: "none",
+              color: tab === t ? "#f1f1f1" : "#aaa", fontSize: 14, fontWeight: tab === t ? 500 : 400,
+              borderBottom: `3px solid ${tab === t ? "#f1f1f1" : "transparent"}`
+            }}>{t}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ padding: 24 }}>
+        {tab === "Videos" && <VideoGrid videos={videos} loading={false} onWatch={onWatch} onChannel={onChannel} />}
+        {tab === "About" && (
+          <div style={{ maxWidth: 700 }}>
+            <h3 style={{ color: "#f1f1f1", fontSize: 16, fontWeight: 600, marginBottom: 16 }}>About</h3>
+            {data.description
+              ? <p style={{ fontSize: 14, color: "#aaa", lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{data.description}</p>
+              : <p style={{ color: "#aaa", fontSize: 14 }}>No description provided.</p>
+            }
+            <div style={{ marginTop: 24, display: "flex", flexDirection: "column", gap: 12 }}>
+              {[["Followers", fmt(data.followersCount || 0)], ["Following", fmt(data.followsCount || 0)], ["Posts", fmt(data.postsCount || 0)], ["Videos on SkyTube", fmt(videos.length)]].map(([l, v]) => (
+                <div key={l} style={{ display: "flex", gap: 24 }}>
+                  <div style={{ color: "#aaa", fontSize: 14, width: 160 }}>{l}</div>
+                  <div style={{ color: "#f1f1f1", fontSize: 14, fontWeight: 500 }}>{v}</div>
+                </div>
+              ))}
+            </div>
+            <a href={`https://bsky.app/profile/${data.handle}`} target="_blank" rel="noreferrer"
+              style={{ display: "inline-block", marginTop: 24, color: "#3ea6ff", fontSize: 14 }}>View on Bluesky →</a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Search Page ────────────────────────────────────────────────────────────────
+function SearchPage({ results, loading, query, onWatch, onChannel }) {
+  const [filter, setFilter] = useState("All");
+
+  const videos = (results && results.videos) || [];
+  const actors = (results && results.actors) || [];
+
+  if (loading) return (
+    <div style={{ padding: 24 }}>
+      <div style={{ color: "#aaa", fontSize: 14, marginBottom: 24 }}>Searching for "{query}"…</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {Array(6).fill(0).map((_, i) => (
+          <div key={i} style={{ display: "flex", gap: 12 }}>
+            <div className="skt-shimmer" style={{ width: 168, height: 94, borderRadius: 8, background: "#272727", flexShrink: 0 }} />
+            <div style={{ flex: 1 }}>
+              <div className="skt-shimmer" style={{ height: 14, background: "#272727", borderRadius: 4, marginBottom: 8, width: "80%" }} />
+              <div className="skt-shimmer" style={{ height: 12, background: "#272727", borderRadius: 4, width: "50%" }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ padding: "16px 24px" }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        {["All", "Channels", "Videos"].map((f) => (
+          <button key={f} onClick={() => setFilter(f)} style={{
+            padding: "6px 12px", borderRadius: 8, border: "1px solid #3f3f3f",
+            background: filter === f ? "#f1f1f1" : "none",
+            color: filter === f ? "#0f0f0f" : "#f1f1f1", fontSize: 14
+          }}>{f}</button>
+        ))}
+      </div>
+      <div style={{ color: "#aaa", fontSize: 13, marginBottom: 16 }}>Results for "{query}"</div>
+
+      {/* Channels */}
+      {(filter === "All" || filter === "Channels") && actors.length > 0 && (
+        <div style={{ marginBottom: 32 }}>
+          <h3 style={{ color: "#f1f1f1", fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Channels</h3>
+          {actors.slice(0, filter === "Channels" ? 20 : 4).map((a, i) => (
+            <div key={i} onClick={() => onChannel(a.handle)}
+              style={{ display: "flex", alignItems: "center", gap: 24, padding: "16px 0", cursor: "pointer", borderBottom: "1px solid #272727" }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+            >
+              <Avatar src={a.avatar} size={88} />
+              <div>
+                <div style={{ color: "#f1f1f1", fontWeight: 500, fontSize: 15 }}>{a.displayName || a.handle}</div>
+                <div style={{ color: "#aaa", fontSize: 13, marginTop: 2 }}>@{a.handle} • {fmt(a.followersCount || 0)} followers</div>
+                {a.description && (
+                  <div style={{ color: "#aaa", fontSize: 13, marginTop: 6, maxWidth: 500 }}>
+                    {a.description.slice(0, 120)}{a.description.length > 120 ? "…" : ""}
+                  </div>
+                )}
+              </div>
+              <button onClick={(e) => e.stopPropagation()}
+                style={{ marginLeft: "auto", background: "#f1f1f1", border: "none", color: "#0f0f0f", padding: "8px 16px", borderRadius: 20, fontWeight: 600, fontSize: 13, flexShrink: 0 }}>
+                Follow
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Videos */}
+      {(filter === "All" || filter === "Videos") && (
+        <div>
+          <h3 style={{ color: "#f1f1f1", fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
+            Videos{videos.length > 0 ? ` (${videos.length})` : ""}
+          </h3>
+          {videos.length === 0
+            ? <div style={{ color: "#aaa", fontSize: 14, padding: "24px 0" }}>No videos found for "{query}". Try a different search.</div>
+            : videos.map((post, i) => <VideoCardCompact key={post.uri || i} post={post} onWatch={onWatch} onChannel={onChannel} />)
+          }
+        </div>
+      )}
+
+      {!loading && videos.length === 0 && actors.length === 0 && (
+        <div style={{ textAlign: "center", padding: "48px 0", color: "#aaa" }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>🔍</div>
+          <div style={{ fontSize: 16, marginBottom: 8 }}>No results found</div>
+          <div style={{ fontSize: 14, color: "#555" }}>Try different keywords</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── App ────────────────────────────────────────────────────────────────────────
+function App() {
+  const [session,       setSession]       = useState(null);
+  const [page,          setPage]          = useState("home");
+  const [sidebarOpen,   setSidebarOpen]   = useState(true);
+  const [showLogin,     setShowLogin]     = useState(false);
+  const [searchInput,   setSearchInput]   = useState("");
+
+  const [homeVideos,    setHomeVideos]    = useState([]);
+  const [homeLoading,   setHomeLoading]   = useState(true);
+  const [currentVideo,  setCurrentVideo]  = useState(null);
+  const [related,       setRelated]       = useState([]);
+  const [thread,        setThread]        = useState(null);
+  const [channelData,   setChannelData]   = useState(null);
+  const [channelVideos, setChannelVideos] = useState([]);
+  const [channelLoading,setChannelLoading]= useState(false);
+  const [searchQuery,   setSearchQuery]   = useState("");
+  const [searchResults, setSearchResults] = useState(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+
+  // Load home feed
+  const loadHome = useCallback(async (sess) => {
+    setHomeLoading(true);
+    const seen = new Set();
+    const videos = [];
+    const add = (posts) => {
+      for (const p of (posts || [])) {
+        if (p && isVid(p) && !seen.has(p.uri)) { videos.push(p); seen.add(p.uri); }
+      }
+    };
+    try {
+      if (sess) {
+        const r = await fetch(`${AUTH}/app.bsky.feed.getTimeline?limit=100`, { headers: { Authorization: `Bearer ${sess.accessJwt}` } });
+        const d = await r.json();
+        add((d.feed || []).map((i) => i.post));
+      }
+      const terms = ["video", "watch", "clip", "vlog", "reel"];
+      const batches = await Promise.all(
+        terms.map((t) =>
+          fetch(`${PUB}/app.bsky.feed.searchPosts?q=${encodeURIComponent(t)}&limit=50&sort=latest`)
+            .then((r) => r.json()).then((d) => d.posts || []).catch(() => [])
+        )
+      );
+      batches.forEach(add);
+      const hotRes = await fetch(`${PUB}/app.bsky.feed.getFeed?feed=at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot&limit=100`).catch(() => null);
+      if (hotRes && hotRes.ok) { const d = await hotRes.json(); add((d.feed || []).map((i) => i.post)); }
+    } catch (err) { console.error("loadHome error:", err); }
+    setHomeVideos(videos);
+    setHomeLoading(false);
+  }, []);
+
+  useEffect(() => { if (page === "home") loadHome(session); }, [page]);
+
+  const handleWatch = useCallback(async (post) => {
+    setCurrentVideo(post);
+    setThread(null);
+    setRelated([]);
+    setPage("watch");
+    window.scrollTo(0, 0);
+    try {
+      const [tRes, fRes] = await Promise.all([
+        fetch(`${PUB}/app.bsky.feed.getPostThread?uri=${encodeURIComponent(post.uri)}&depth=6`),
+        fetch(`${PUB}/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(post.author.did)}&limit=50`),
+      ]);
+      const tData = await tRes.json();
+      const fData = await fRes.json();
+      setThread(tData.thread);
+      setRelated((fData.feed || []).map((i) => i.post).filter((p) => isVid(p) && p.uri !== post.uri).slice(0, 15));
+    } catch (err) { console.error(err); }
+  }, []);
+
+  const handleChannel = useCallback(async (actor) => {
+    setChannelData(null);
+    setChannelVideos([]);
+    setChannelLoading(true);
+    setPage("channel");
+    window.scrollTo(0, 0);
+    try {
+      const [pRes, fRes] = await Promise.all([
+        fetch(`${PUB}/app.bsky.actor.getProfile?actor=${encodeURIComponent(actor)}`),
+        fetch(`${PUB}/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(actor)}&limit=100&filter=posts_with_media`),
+      ]);
+      const profile = await pRes.json();
+      const feed    = await fRes.json();
+      setChannelData(profile);
+      setChannelVideos((feed.feed || []).map((i) => i.post).filter(isVid));
+    } catch (err) { console.error(err); }
+    setChannelLoading(false);
+  }, []);
+
+  const handleSearch = useCallback(async (q) => {
+    setSearchQuery(q);
+    setSearchInput(q);
+    setSearchResults(null);
+    setSearchLoading(true);
+    setPage("search");
+    window.scrollTo(0, 0);
+    try {
+      const [pRes, aRes] = await Promise.all([
+        fetch(`${PUB}/app.bsky.feed.searchPosts?q=${encodeURIComponent(q)}&limit=50`),
+        fetch(`${PUB}/app.bsky.actor.searchActors?q=${encodeURIComponent(q)}&limit=15`),
+      ]);
+      const pData = await pRes.json();
+      const aData = await aRes.json();
+      setSearchResults({ videos: (pData.posts || []).filter(isVid), actors: aData.actors || [] });
+    } catch (err) { setSearchResults({ videos: [], actors: [] }); }
+    setSearchLoading(false);
+  }, []);
+
+  const marginLeft = sidebarOpen ? 240 : 72;
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0f0f0f", color: "#f1f1f1" }}>
+      <Header
+        onHome={() => { setPage("home"); window.scrollTo(0, 0); }}
+        onSearch={handleSearch}
+        session={session}
+        onLogin={() => setShowLogin(true)}
+        onLogout={() => setSession(null)}
+        input={searchInput}
+        setInput={setSearchInput}
+        toggleSidebar={() => setSidebarOpen((o) => !o)}
+      />
+
+      <Sidebar
+        open={sidebarOpen}
+        page={page}
+        onHome={() => { setPage("home"); window.scrollTo(0, 0); }}
+        onExplore={handleSearch}
+        onFeed={() => handleSearch("video")}
+        onSubscriptions={() => session ? handleSearch("video") : setShowLogin(true)}
+        hasSession={!!session}
+      />
+
+      <main style={{ marginLeft: marginLeft, marginTop: 56, minHeight: "calc(100vh - 56px)", transition: "margin-left 0.15s ease" }}>
+        {page === "home" && (
+          <HomePage videos={homeVideos} loading={homeLoading} onWatch={handleWatch} onChannel={handleChannel} onExplore={handleSearch} />
+        )}
+        {page === "watch" && currentVideo && (
+          <WatchPage post={currentVideo} related={related} thread={thread} onWatch={handleWatch} onChannel={handleChannel} />
+        )}
+        {page === "channel" && (
+          <ChannelPage data={channelData} videos={channelVideos} loading={channelLoading} onWatch={handleWatch} onChannel={handleChannel} />
+        )}
+        {page === "search" && (
+          <SearchPage results={searchResults} loading={searchLoading} query={searchQuery} onWatch={handleWatch} onChannel={handleChannel} />
+        )}
+      </main>
+
+      {showLogin && (
+        <LoginModal
+          onClose={() => setShowLogin(false)}
+          onSuccess={(data) => { setSession(data); setShowLogin(false); loadHome(data); }}
+        />
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>

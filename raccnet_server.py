@@ -101,6 +101,7 @@ body{background:#0f0f0f;color:#f1f1f1;font-family:'Roboto',sans-serif;overflow-x
 .upload-pulse{animation:uploadpulse 1.2s ease-in-out infinite}
 .shimmer{animation:shimmer 1.5s ease-in-out infinite}
 .clamp2{overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;max-height:2.8em;line-height:1.4em}
+.clamp2f{overflow:hidden;max-height:2.8em;line-height:1.4em}
 button{-moz-appearance:none;cursor:pointer;font-family:'Roboto',sans-serif}
 input{-moz-appearance:none;font-family:'Roboto',sans-serif}
 video::-webkit-media-controls-timeline{accent-color:var(--accent)}
@@ -126,7 +127,7 @@ button:focus,input:focus,video:focus{outline:none}
   }catch(e){}
 })();
 'use strict';
-const { h, render, useState, useEffect, useRef, useCallback, createContext, useContext } = htmPreact;
+const { h, render, useState, useEffect, useLayoutEffect, useRef, useCallback, createContext, useContext } = htmPreact;
 const html = htmPreact.html;
 var _globalRateLimited = { value: false, set: null };
 
@@ -298,6 +299,34 @@ async function ensureDmConvos(sess){
     var errRes={convos:[],blockedDids:new Set(),dmErr:false,error:e.message};
     _dmConvosCache.pending.forEach(function(cb){cb(errRes);});_dmConvosCache.pending=[];
     throw e;
+  }
+}
+var _mutualsDidsCache = {did:null,mutuals:null,loading:false,pending:[]};
+async function ensureMutuals(sess){
+  if(!sess) return [];
+  if(_mutualsDidsCache.did===sess.did&&_mutualsDidsCache.mutuals!==null) return _mutualsDidsCache.mutuals;
+  if(_mutualsDidsCache.loading&&_mutualsDidsCache.did===sess.did){
+    return new Promise(function(resolve){_mutualsDidsCache.pending.push(resolve);});
+  }
+  _mutualsDidsCache={did:sess.did,mutuals:null,loading:true,pending:[]};
+  try{
+    var allFollows=[];var cursor='';
+    for(var p=0;p<20;p++){
+      var url=AUTH_PROXY+'/app.bsky.graph.getFollows?actor='+encodeURIComponent(sess.did)+'&limit=100'+(cursor?'&cursor='+encodeURIComponent(cursor):'');
+      try{var r=await api(url,{headers:{Authorization:'Bearer '+sess.accessJwt}});
+        if(!r.ok) break;
+        var d=await r.json(); allFollows=allFollows.concat(d.follows||[]);
+        if(!d.cursor) break; cursor=d.cursor;
+      }catch(e2){break;}
+    }
+    var muts=allFollows.filter(function(f){return f.viewer&&f.viewer.followedBy;});
+    _mutualsDidsCache.mutuals=muts; _mutualsDidsCache.loading=false;
+    _mutualsDidsCache.pending.forEach(function(cb){cb(muts);}); _mutualsDidsCache.pending=[];
+    return muts;
+  }catch(e){
+    _mutualsDidsCache.loading=false; _mutualsDidsCache.mutuals=[];
+    _mutualsDidsCache.pending.forEach(function(cb){cb([]);}); _mutualsDidsCache.pending=[];
+    return [];
   }
 }
 // Last share button bounding rect — ShareModal reads this to position the dropdown
@@ -851,7 +880,7 @@ function PostImageCell(props) {
   function sharePanelEnter(){clearTimeout(leaveTimerRef.current);}
   function sharePanelLeave(){clearTimeout(leaveTimerRef.current);leaveTimerRef.current=setTimeout(function(){setShowShare(false);},300);}
 
-  return html`<div ref=${cellRef} style=${{aspectRatio:'1',background:'#111',cursor:'pointer',position:'relative'}}
+  return html`<div ref=${cellRef} style=${{aspectRatio:props.aspect||'1',background:'#111',cursor:'pointer',position:'relative',...(props.containerStyle||{})}}
     onMouseEnter=${imgCardEnter}
     onMouseLeave=${imgCardLeave}>
     ${showShare?html`<${ShareModal} post=${p} session=${sess} onClose=${function(){setShowShare(false);}} onPanelEnter=${sharePanelEnter} onPanelLeave=${sharePanelLeave}/>`  :null}
@@ -1463,7 +1492,7 @@ function VideoCard(props) {
   const embed  = post.embed || {};
   const author = post.author;
   const rec    = post.record;
-  const title = stripPartNum((rec && rec.text) || 'Untitled video');
+  const title = stripPartNum(((rec && rec.text) || 'Untitled video').split('\n')[0]);
   const [hovering, setHovering] = useState(false);
   const [previewReady, setPreviewReady] = useState(false);
   const videoRef = useRef(null);
@@ -1793,15 +1822,13 @@ function VideoCard(props) {
     };
   }
 
-  return html`<div style=${{cursor:'pointer',minWidth:0,overflow:'hidden'}}>
+  return html`<div style=${{cursor:'pointer',minWidth:0}}>
     ${repostedBy?html`<div style=${{display:'flex',alignItems:'center',gap:5,padding:'5px 8px',color:'#777',fontSize:11,borderBottom:'1px solid #222',background:'#141414'}}>
       <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
       <span>${repostedBy.displayName||repostedBy.handle||'Someone'} reposted</span>
     </div>`:null}
     <div style=${{width:'100%',paddingBottom:'56.25%',overflow:'hidden',
-      background:blocked?'var(--accent-dim)':'#1a1a1a',position:'relative',
-      outline:blocked?'2px solid var(--accent)':cardHov?'2px solid var(--accent)':'2px solid transparent',
-      transition:'outline 0.15s'}}
+      background:blocked?'var(--accent-dim)':'#1a1a1a',position:'relative'}}
       onClick=${function(){if(!blocked)props.onWatch(post);}}
       onMouseEnter=${function(){setCardHov(true);clearTimeout(leaveTimerRef.current);if(!blocked&&embed.playlist)onEnter();}}
       onMouseLeave=${function(){setCardHov(false);if(!blocked&&embed.playlist)onLeave();else{setMenuOpen(false);setMenuView('main');clearTimeout(leaveTimerRef.current);leaveTimerRef.current=setTimeout(function(){setShowShare(false);},300);}}}>
@@ -1836,6 +1863,9 @@ function VideoCard(props) {
           </div>`:null}
         </div>`:null}
       </div>`}
+    <div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,zIndex:9,pointerEvents:'none',
+      boxShadow:'inset 0 0 0 2px var(--accent)',
+      opacity:(blocked||cardHov)?1:0,transition:'opacity 0.15s'}}/>
     </div>
     <div style=${{display:'flex',gap:12,paddingTop:12}}>
       ${blocked
@@ -1845,17 +1875,22 @@ function VideoCard(props) {
             <span style=${{color:'var(--accent)',fontSize:9,fontWeight:700,textAlign:'center',lineHeight:1.2}}>Blocked</span>
           </div>`
         : html`<${Avatar} src=${author.avatar} onClick=${function(e){e.stopPropagation();props.onChannel(author.handle);}}/>`}
-      <div style=${{flex:1,minWidth:0}} onClick=${function(){if(!blocked)props.onWatch(post);}}>
-        <div class="clamp2" style=${{fontSize:14,fontWeight:500,color:blocked?'#555':'#f1f1f1'}}>${blocked?'Untitled video':title}</div>
-        <div onClick=${function(e){e.stopPropagation();if(!blocked)props.onChannel(author.handle);}}
-          style=${{fontSize:13,color:'#aaa',marginTop:4,cursor:blocked?'default':'pointer'}}
-          onMouseEnter=${function(e){if(!blocked)e.currentTarget.style.color='#f1f1f1';}}
-          onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';}}>
-          ${blocked?'Blocked':(author.displayName || author.handle)}
+      <div style=${{flex:1,minWidth:0,display:'flex',alignItems:'flex-start',gap:0}}>
+        <div style=${{flex:1,minWidth:0}} onClick=${function(){if(!blocked)props.onWatch(post);}}>
+          <div class="clamp2" style=${{fontSize:14,fontWeight:500,lineHeight:'1.4em',color:blocked?'#555':'#f1f1f1'}}>
+            ${blocked?'Untitled video':title}
+          </div>
+          <div onClick=${function(e){e.stopPropagation();if(!blocked)props.onChannel(author.handle);}}
+            style=${{fontSize:13,color:'#aaa',marginTop:4,cursor:blocked?'default':'pointer'}}
+            onMouseEnter=${function(e){if(!blocked)e.currentTarget.style.color='#f1f1f1';}}
+            onMouseLeave=${function(e){e.currentTarget.style.color='#aaa';}}>
+            ${blocked?'Blocked':(author.displayName || author.handle)}
+          </div>
+          <div style=${{display:'flex',alignItems:'center',marginTop:2}}>
+            <div style=${{fontSize:13,color:'#aaa',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',minWidth:0}}>${blocked?'0 likes':(fmt(post.likeCount||0)+' likes · '+ago(post.indexedAt))}</div>
+          </div>
         </div>
-        <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:2}}>
-          <div style=${{fontSize:13,color:'#aaa',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',minWidth:0}}>${blocked?'0 likes':(fmt(post.likeCount||0)+' likes · '+ago(post.indexedAt))}</div>
-          <div style=${{position:'relative'}} ref=${menuRef}>
+        <div ref=${menuRef} style=${{position:'relative'}}>
             <button
               onClick=${function(e){e.stopPropagation();setMenuOpen(function(o){return !o;});if(!menuOpen){setMenuView('main');setPlaylistMsg('');}}}
               onMouseEnter=${function(){setMenuHov(true);}}
@@ -2087,7 +2122,6 @@ function VideoCard(props) {
               </div>`:null}
             </div>`:null}
           </div>
-        </div>
       </div>
     </div>
   ${showShare?html`<${ShareModal} post=${post} session=${props.session||null} onClose=${function(){setShowShare(false);}} onPanelEnter=${vidSharePanelEnter} onPanelLeave=${vidSharePanelLeave}/>`  :null}
@@ -2099,7 +2133,7 @@ function VideoCardCompact(props) {
   const post = props.post;
   if (!isVid(post) && !isVidRaw(post)) return null;
   const embed = post.embed || {}, author = post.author, rec = post.record;
-  const title = stripPartNum((rec && rec.text) || 'Untitled video');
+  const title = stripPartNum(((rec && rec.text) || 'Untitled video').split('\n')[0]);
   const [cvHover, setCvHover] = useState(false);
   return html`<div onClick=${function(){props.onWatch(post);}}
     style=${{display:'flex',gap:8,cursor:'pointer',padding:'8px 0'}}>
@@ -2863,6 +2897,15 @@ function saveFilter(v){ try{localStorage.setItem(FILTER_KEY,v);}catch(e){} }
 const CONTENT_SUB_KEY = 'raccnet_content_sub';
 function loadContentSub(){ try{return localStorage.getItem(CONTENT_SUB_KEY)||'Videos';}catch(e){return 'Videos';} }
 function saveContentSub(v){ try{localStorage.setItem(CONTENT_SUB_KEY,v);}catch(e){} }
+const FRIENDS_INCLUDE_KEY = 'raccnet_friends_include';
+function loadFriendsInclude(){
+  try{
+    var v=localStorage.getItem(FRIENDS_INCLUDE_KEY);
+    if(v){var p=JSON.parse(v);return {videos:p.videos!==false,images:p.images!==false,playlists:p.playlists!==false,channels:p.channels!==false};}
+  }catch(e){}
+  return {videos:true,images:true,playlists:true,channels:true};
+}
+function saveFriendsInclude(v){ try{localStorage.setItem(FRIENDS_INCLUDE_KEY,JSON.stringify(v));}catch(e){} }
 function loadThoughtsHide(){ try{return localStorage.getItem('raccnet_thoughts_hide')||'';}catch(e){return '';} }
 function saveThoughtsHide(v){ try{if(v)localStorage.setItem('raccnet_thoughts_hide',v);else localStorage.removeItem('raccnet_thoughts_hide');}catch(e){} }
 const MOBILECOLS_KEY = 'raccnet_mobilecols';
@@ -3163,11 +3206,20 @@ function FriendsFeed(props) {
   const [playlistItems, setPlaylistItems] = useState([]);  // shared playlist items
   const [channelItems, setChannelItems] = useState([]);  // shared channel profile cards
   const [senders,      setSenders]      = useState([]);
-  const [contentSub,   setContentSub]   = useState(function(){return loadContentSub();});
-  useEffect(function(){ saveContentSub(contentSub); }, [contentSub]);
+  const [includeFilter, setIncludeFilter] = useState(function(){return loadFriendsInclude();});
+  useEffect(function(){ saveFriendsInclude(includeFilter); }, [includeFilter]);
+  const [includeOpen, setIncludeOpen] = useState(false);
+  const includeRef = useRef(null);
+  useEffect(function(){
+    if(!includeOpen) return;
+    function handler(e){if(includeRef.current&&!includeRef.current.contains(e.target))setIncludeOpen(false);}
+    document.addEventListener('mousedown',handler);
+    return function(){document.removeEventListener('mousedown',handler);};
+  },[includeOpen]);
   const [gridSizeTick, setGridSizeTick] = useState(0);
   const [loading,  setLoading]  = useState(false);
   const [loaded,   setLoaded]   = useState(false);
+  const [ffRefreshKey, setFfRefreshKey] = useState(0);
   const [err,      setErr]      = useState('');
   const _ffSort = loadFriendsSort();
   const [sortOrder,setSortOrder]= useState(function(){return _ffSort.sortOrder;});
@@ -3182,7 +3234,8 @@ function FriendsFeed(props) {
     return function(){ saveScrollPos('friendsfeed'); };
   },[]);
   function chatUrl(path) {
-    var pdsHost = sess&&sess.pdsDid ? sess.pdsDid.replace('did:web:','') : 'bsky.social';
+    var s = _sessionRef.current || sess;
+    var pdsHost = s&&s.pdsDid ? s.pdsDid.replace('did:web:','') : 'bsky.social';
     return CHAT_PROXY+path+'?_pds='+encodeURIComponent(pdsHost);
   }
 
@@ -3191,7 +3244,10 @@ function FriendsFeed(props) {
     var cancelled=false;
     async function load(){
       setLoading(true); setErr('');
+      setItems([]); setPostItems([]); setSenders([]); setPlaylistItems([]); setChannelItems([]);
       try{
+        // Ensure we have a fresh token before any API calls (fixes first-load expiry)
+        var sess = (await autoRefreshSession()) || props.session;
         // 0. Get blocked accounts so we can filter them out
         var blockedDids=new Set();
         try{
@@ -3305,8 +3361,9 @@ function FriendsFeed(props) {
           for(var k=0;k<uris.length;k+=25){
             var batch=uris.slice(k,k+25);
             var qstr=batch.map(function(u){return 'uris='+encodeURIComponent(u);}).join('&');
-            var pr=await api(PUB_PROXY+'/app.bsky.feed.getPosts?'+qstr);
-            if(pr.ok){(await pr.json()).posts.forEach(function(p){hydrated[p.uri]=p;});}
+            var pr=await api(AUTH_PROXY+'/app.bsky.feed.getPosts?'+qstr,
+              {headers:{Authorization:'Bearer '+sess.accessJwt}});
+            if(pr.ok){var hposts=(await pr.json()).posts;hposts.forEach(function(p){hydrated[p.uri]=p;});_trackLiked(hposts);}
           }
           toHydrate.forEach(function(x){x.post=hydrated[x.postUri]||null;});
         }
@@ -3420,7 +3477,7 @@ function FriendsFeed(props) {
     }
     load();
     return function(){cancelled=true;};
-  },[sess&&sess.did]);
+  },[sess&&sess.did,ffRefreshKey]);
 
   if(!sess) return html`<div style=${{padding:24,color:'#aaa'}}>Sign in to see videos shared with you.</div>`;
   if(loading) return html`<div style=${{padding:24,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:200}}><${RaccNetLoadingIndicator} label="Loading shared videos…"/></div>`;
@@ -3441,34 +3498,64 @@ function FriendsFeed(props) {
     var rMs={Daily:86400000,Weekly:604800000,Monthly:2592000000,Yearly:31536000000}[timeRange];
     if (rMs) sortedItems = sortedItems.filter(function(it){var d=(it.post&&it.post.indexedAt)||'';return d&&(Date.now()-new Date(d).getTime())<=rMs;});
   }
-  var gridMode = contentSub==='Images'?'images':'videos';
   var gridOrient = portrait?'portrait':'landscape';
-  var imgCols = loadGridSize('images',gridOrient);
-  var btnSt2 = function(active){ return {padding:portrait?'4px 10px':'6px 14px',background:active?'var(--accent)':'none',color:active?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}; };
+  var incBtnSt = {padding:'6px 12px',background:'none',color:'var(--accent)',border:'none',fontSize:13,fontWeight:500,cursor:'pointer',borderRadius:0,display:'flex',alignItems:'center',gap:5};
+  var incMenuItemSt = function(active){ return {display:'block',width:'100%',padding:'8px 16px',background:active?'var(--accent-dim)':'none',border:'none',borderLeft:active?'2px solid var(--accent)':'2px solid transparent',color:active?'var(--accent)':'#f1f1f1',fontSize:13,cursor:'pointer',textAlign:'left',fontFamily:'Roboto,sans-serif',transition:'background 0.1s, color 0.1s',boxSizing:'border-box'}; };
   return html`<div style=${{padding:24}}>
     <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8,
       position:'sticky',top:0,zIndex:50,background:'#0f0f0f',padding:'12px 0'}}>
-      <h2 style=${{color:'#f1f1f1',fontSize:20,fontWeight:700,margin:0}}>From Friends</h2>
+      <div style=${{display:'flex',alignItems:'center',gap:8}}>
+        <h2 style=${{color:'#f1f1f1',fontSize:20,fontWeight:700,margin:0}}>From Friends</h2>
+        <button onClick=${function(){setLoaded(false);setFfRefreshKey(function(k){return k+1;});}}
+          title="Refresh"
+          style=${{background:'none',border:'none',color:'var(--accent)',cursor:'pointer',padding:'4px',display:'flex',alignItems:'center',flexShrink:0}}
+          onMouseEnter=${function(e){e.currentTarget.style.opacity='0.7';}}
+          onMouseLeave=${function(e){e.currentTarget.style.opacity='1';}}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+        </button>
+      </div>
       <div style=${{display:'flex',gap:4,alignItems:'center',flexWrap:'wrap'}}>
-        <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?gridMode:null} gridOrient=${gridOrient} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
-        ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';var st=btnSt2(!dis&&contentSub===s);if(dis)st=Object.assign({},st,{color:'#3a3a3a',cursor:'not-allowed',opacity:0.45});return html`<button key=${s} onClick=${dis?null:function(){setContentSub(s);}} style=${st}>${s}</button>`;})}
+        <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode='videos' gridOrient=${gridOrient} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
+        <div style=${{position:'relative'}} ref=${includeRef}>
+          <button style=${incBtnSt} onClick=${function(){setIncludeOpen(function(o){return !o;});}}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            Include
+          </button>
+          ${includeOpen?html`<div style=${{position:'absolute',top:'calc(100% + 2px)',right:0,background:'#1a1a1a',border:'1px solid var(--accent)',minWidth:160,zIndex:600,boxShadow:'0 4px 20px rgba(0,0,0,0.7)'}} onClick=${function(e){e.stopPropagation();}}>
+            ${['Videos','Images','Playlists','Channels'].map(function(t){
+              var key=t.toLowerCase();
+              var active=!!includeFilter[key];
+              return html`<button key=${t}
+                style=${incMenuItemSt(active)}
+                onMouseEnter=${function(e){e.currentTarget.style.background='var(--accent-dim)';e.currentTarget.style.color='var(--accent)';}}
+                onMouseLeave=${function(e){e.currentTarget.style.background=active?'var(--accent-dim)':'none';e.currentTarget.style.color=active?'var(--accent)':'#f1f1f1';}}
+                onClick=${function(){setIncludeFilter(function(prev){var n=Object.assign({},prev);n[key]=!n[key];return n;});}}>
+                ${active?'✓ ':''} ${t}
+              </button>`;
+            })}
+          </div>`:null}
+        </div>
       </div>
     </div>
     ${senders.length>0?html`<${FollowStrip} actors=${senders} onChannel=${props.onChannel}/>`:null}
-    ${contentSub==='Videos'?(function(){
-      // Build unified mixed grid sorted by sentAt
+    ${(function(){
       var mixedGrid=[];
-      sortedItems.forEach(function(it){ mixedGrid.push({_gt:'video',sentAt:it.sentAt||it.post&&it.post.indexedAt||'',item:it}); });
-      playlistItems.forEach(function(it){ mixedGrid.push({_gt:'playlist',sentAt:it.sentAt||'',item:it}); });
-      channelItems.forEach(function(it){ mixedGrid.push({_gt:'channel',sentAt:it.sentAt||'',item:it}); });
+      if(includeFilter.videos) sortedItems.forEach(function(it){ mixedGrid.push({_gt:'video',sentAt:it.sentAt||it.post&&it.post.indexedAt||'',item:it}); });
+      if(includeFilter.playlists) playlistItems.forEach(function(it){ mixedGrid.push({_gt:'playlist',sentAt:it.sentAt||'',item:it}); });
+      if(includeFilter.channels) channelItems.forEach(function(it){ mixedGrid.push({_gt:'channel',sentAt:it.sentAt||'',item:it}); });
+      if(includeFilter.images) postItems.filter(function(it){return isImagePost(it.post);}).forEach(function(it){ mixedGrid.push({_gt:'image',sentAt:it.sentAt||it.post&&it.post.indexedAt||'',item:it}); });
       mixedGrid.sort(function(a,b){ return b.sentAt.localeCompare(a.sentAt); });
-      return html`<div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat(auto-fill,minmax(280px,1fr))',gap:portrait?'16px 8px':'24px 16px'}}>
+      var imageGridPosts=mixedGrid.filter(function(e){return e._gt==='image';}).map(function(e){return e.item.post;});
+      var imgIdxCounter=0;
+      mixedGrid=mixedGrid.map(function(e){return e._gt==='image'?Object.assign({},e,{_imgIdx:imgIdxCounter++}):e;});
+      var _ffCols=loadGridSize('videos',gridOrient);
+      return html`<div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat('+_ffCols+',minmax(0,1fr))',gap:portrait?'12px 8px':'12px 16px'}}>
         ${mixedGrid.length?mixedGrid.map(function(entry,i){
-          if(entry._gt==='video') return html`<${FriendCard} key=${'v'+i} item=${entry.item} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
+          if(entry._gt==='video') return html`<${FriendCard} key=${'v'+i} item=${entry.item} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
           if(entry._gt==='playlist'){
             var pl=entry.item.list, sender=entry.item.sender||{};
             var plCreator=pl.creator||{};
-            return html`<div key=${'p'+i} style=${{cursor:'pointer'}}
+            return html`<div key=${'p'+i} style=${{cursor:'pointer',alignSelf:'start'}}
               onClick=${function(){plCreator.handle&&props.onChannel&&props.onChannel(plCreator.handle,{openTab:'Playlists',initialPlaylist:pl.uri});}}>
               <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:6,height:34,overflow:'hidden'}}>
                 <${Avatar} src=${sender.avatar} size=${26} onClick=${function(e){e.stopPropagation();props.onChannel&&props.onChannel(sender.handle);}}/>
@@ -3502,38 +3589,38 @@ function FriendsFeed(props) {
                   </div>
                 </div>
               </div>
+              <div style=${{paddingTop:10,textAlign:'center'}}>
+                <div style=${{color:'#f1f1f1',fontSize:14,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>Playlist</div>
+              </div>
             </div>`;
           }
-          if(entry._gt==='channel') return html`<${ChannelFriendCard} key=${'c'+i} entry=${entry} onChannel=${props.onChannel}/>`;
+          if(entry._gt==='channel') return html`<div key=${'c'+i} style=${{alignSelf:'start'}}><${ChannelFriendCard} entry=${entry} onChannel=${props.onChannel}/></div>`;
+          if(entry._gt==='image'){
+            var imgSender=entry.item.sender||(entry.item.post&&entry.item.post.author)||{};
+            var imgCount=(entry.item.post&&entry.item.post.embed&&entry.item.post.embed.images&&entry.item.post.embed.images.length)||1;
+            return html`<div key=${'i'+i} style=${{alignSelf:'start'}}>
+              <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:6,height:34,overflow:'hidden'}}>
+                <${Avatar} src=${imgSender.avatar} size=${26} onClick=${function(e){e.stopPropagation();props.onChannel&&props.onChannel(imgSender.handle);}}/>
+                <span style=${{color:'#e0e0e0',fontSize:12,fontWeight:600,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:140}}>${imgSender.displayName||imgSender.handle||'Unknown'}</span>
+                <span style=${{flex:1}}></span>
+                <span style=${{color:'#444',fontSize:11,flexShrink:0}}>${ago(entry.sentAt)}</span>
+              </div>
+              <div style=${{width:'100%',paddingBottom:'56.25%',position:'relative',background:'#111'}}>
+                <div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                  <div style=${{height:'100%',aspectRatio:'1',overflow:'hidden',outline:'2px solid #fff'}}>
+                    <${PostImageCell} post=${entry.item.post} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} gridItems=${imageGridPosts} gridIdx=${entry._imgIdx}/>
+                  </div>
+                </div>
+              </div>
+              <div style=${{paddingTop:10,textAlign:'center'}}>
+                <div style=${{color:'#f1f1f1',fontSize:14,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${imgCount>1?'Images':'Image'}</div>
+              </div>
+            </div>`;
+          }
           return null;
-        }):html`<div style=${{padding:'32px 0',color:'#555',fontSize:14,gridColumn:'1/-1'}}>No videos shared with you yet.</div>`}
+        }):html`<div style=${{padding:'32px 0',color:'#555',fontSize:14,gridColumn:'1/-1'}}>No content shared with you yet.</div>`}
       </div>`;
-    })():null}
-    ${contentSub==='Images'?html`<${PostImageGrid} items=${postItems.map(function(x){return {post:x.post};})} cols=${imgCols} loading=${loading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session} sortOrder=${sortOrder} timeRange=${timeRange} hideLiked=${hideLiked} contentFilter=${contentFilter} hideHistory=${hideHistory} _tick=${gridSizeTick}/>`:null}
-    ${contentSub==='Timeline'?html`<${ChannelPostsFeed}
-      posts=${postItems.map(function(x){return {post:x.post};})}
-      loading=${false}
-      session=${props.session}
-      onChannel=${props.onChannel}
-      onWatch=${props.onWatch}
-      hideFilter=${true}
-      stateKey=${'friends'}
-      sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}
-    />`:null}
-    ${contentSub==='Hybrid'?(function(){
-      var allFF=[];
-      sortedItems.forEach(function(it){allFF.push({type:'video',sentAt:it.sentAt||it.post&&it.post.indexedAt||'',item:it});});
-      postItems.forEach(function(it){allFF.push({type:'post',sentAt:it.sentAt||it.post&&it.post.indexedAt||'',item:it});});
-      playlistItems.forEach(function(it){allFF.push({type:'playlist',sentAt:it.sentAt||'',item:it});});
-      channelItems.forEach(function(it){allFF.push({type:'channel',sentAt:it.sentAt||'',item:it});});
-      allFF.sort(function(a,b){return b.sentAt.localeCompare(a.sentAt);});
-      if(!allFF.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>Nothing shared with you yet.</div>`;
-      return html`<div>${allFF.map(function(entry,i){
-        if(entry.type==='video') return html`<${FriendCard} key=${'v'+i} item=${entry.item} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
-        if(entry.type==='post') return html`<${PostCard} key=${'p'+i} item=${{post:entry.item.post}} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
-        return null;
-      })}</div>`;
-    })():null}
+    })()}
   </div>`;
 }
 
@@ -3545,43 +3632,21 @@ function FriendCard(props) {
   const needsMore=msgText.length>MAX;
   const short=msgText.slice(0,MAX)+(needsMore?'...':'');
   const [open,setOpen]=useState(false);
-  const author=post.author||{};
-  const rec=post.record||{};
-  const embed=post.embed||{};
-  const title=(rec.text&&rec.text.split('\n')[0])||'Video';
-  const thumb=embed.thumbnail||(embed.images&&embed.images[0]&&embed.images[0].thumb)||null;
-  const [thumbHov,setThumbHov]=useState(false);
-  return html`<div style=${{cursor:'pointer'}}>
+  return html`<div>
     <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:6,height:34,overflow:'hidden'}}>
       <${Avatar} src=${sender.avatar} size=${26}
         onClick=${function(e){e.stopPropagation();props.onChannel&&props.onChannel(sender.handle);}}/>
       <span style=${{color:'#e0e0e0',fontSize:12,fontWeight:600,flexShrink:0}}>${sender.displayName||sender.handle||'Unknown'}</span>
-      ${msgText?html`<span style=${{color:'#888',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1,minWidth:0}}>${open?'':short}</span>`:html`<span style=${{flex:1}}></span>`}
+      ${msgText?html`<span style=${{color:'#888',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1,minWidth:0}}>${short}</span>`:html`<span style=${{flex:1}}></span>`}
       ${needsMore?html`<span onClick=${function(e){e.stopPropagation();setOpen(function(v){return !v;});}} style=${{color:'var(--accent)',fontSize:11,fontWeight:600,cursor:'pointer',flexShrink:0,marginLeft:4}}>${open?'Close':'Expand'}</span>`:null}
       <span style=${{color:'#444',fontSize:11,flexShrink:0,marginLeft:4}}>${ago(item.sentAt)}</span>
     </div>
-    <div onClick=${function(){if(!open)props.onWatch&&props.onWatch(post);}}
-      onMouseEnter=${function(){setThumbHov(true);}}
-      onMouseLeave=${function(){setThumbHov(false);}}
-      style=${{width:'100%',paddingBottom:'56.25%',overflow:'hidden',background:'#1a1a1a',position:'relative',
-        outline:thumbHov?'2px solid var(--accent)':'2px solid transparent',transition:'outline 0.15s'}}>
-      <div style=${{position:'absolute',top:0,left:0,right:0,bottom:0}}>
-        <${Thumb} src=${thumb}/>
-      </div>
-      ${open?html`<div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,
-        background:'rgba(0,0,0,0.88)',overflowY:'auto',padding:14,zIndex:2,boxSizing:'border-box'}}
+    <div style=${{position:'relative'}}>
+      <${VideoCard} post=${post} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>
+      ${open?html`<div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.93)',zIndex:20,overflow:'auto',padding:14,boxSizing:'border-box'}}
         onClick=${function(e){e.stopPropagation();}}>
         <p style=${{color:'#f1f1f1',fontSize:13,lineHeight:1.65,margin:0,textAlign:'left',wordBreak:'break-word'}}>${msgText}</p>
       </div>`:null}
-    </div>
-    <div style=${{display:'flex',gap:12,paddingTop:12}} onClick=${function(){props.onWatch&&props.onWatch(post);}}>
-      <${Avatar} src=${author.avatar} size=${36}
-        onClick=${function(e){e.stopPropagation();props.onChannel&&props.onChannel(author.handle);}}/>
-      <div style=${{flex:1,minWidth:0}}>
-        <div class="clamp2" style=${{fontSize:14,fontWeight:500,color:'#f1f1f1'}}>${title}</div>
-        <div style=${{fontSize:13,color:'#aaa',marginTop:4}}>${author.displayName||author.handle}</div>
-        <div style=${{fontSize:13,color:'#aaa'}}>${fmt(post.likeCount||0)} likes · ${ago(post.indexedAt)}</div>
-      </div>
     </div>
   </div>`;
 }
@@ -3747,6 +3812,45 @@ function SubscribedFeedPage(props) {
   </div>`;
 }
 
+// ── MixedVideoImageGrid — shared grid for Hybrid mode across all pages ────────
+function MixedVideoImageGrid(props){
+  var portrait=usePortrait();
+  var gridCols=loadGridSize('videos',portrait?'portrait':'landscape');
+  var mobileCols=2;
+  var videos=props.videos||[];
+  var imagePosts=props.imagePosts||[];
+  var loading=props.loading||false;
+  var combined=[];
+  videos.forEach(function(v){
+    combined.push({type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()});
+  });
+  imagePosts.forEach(function(fi){
+    var p=fi.post||fi;
+    combined.push({type:'img',feedItem:fi,post:p,date:new Date(p.indexedAt||p.record&&p.record.createdAt||0).getTime()});
+  });
+  combined.sort(function(a,b){return b.date-a.date;});
+  var imgGrid=combined.filter(function(e){return e.type==='img';}).map(function(e){return e.post;});
+  var idx=0;
+  var entries=combined.map(function(e){return e.type==='img'?Object.assign({},e,{_imgIdx:idx++}):e;});
+  if(!entries.length&&loading) return html`<div style=${{color:'#aaa',padding:'32px',textAlign:'center'}}>Loading…</div>`;
+  if(!entries.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No content.</div>`;
+  return html`<div style=${{display:'grid',gridTemplateColumns:portrait?'repeat('+mobileCols+',minmax(0,1fr))':'repeat('+gridCols+',minmax(0,1fr))',gap:portrait?'12px 8px':'12px 16px'}}>
+    ${entries.map(function(entry,i){
+      if(entry.type==='vid') return html`<${VideoCard} key=${'v'+i} post=${entry.post} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
+      if(entry.type==='img') return html`<div key=${'i'+i} style=${{alignSelf:'start'}}>
+        <div style=${{width:'100%',paddingBottom:'56.25%',position:'relative',background:'#111'}}>
+          <div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+            <div style=${{height:'100%',aspectRatio:'1',overflow:'hidden',outline:'2px solid #fff'}}>
+              <${PostImageCell} post=${entry.post} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} gridItems=${imgGrid} gridIdx=${entry._imgIdx}/>
+            </div>
+          </div>
+        </div>
+      </div>`;
+      return null;
+    })}
+  </div>`;
+}
+
 function SubsPage(props) {
   const portrait = usePortrait();
   const mobileCols = loadMobileCols();
@@ -3780,14 +3884,11 @@ function SubsPage(props) {
 
   function openContentSub(s) {
     setContentSub(s);
-    if ((s==='Timeline'||s==='Images'||s==='Hybrid') && !postsLoaded && props.session) {
-      loadPostsData(props.session);
-    }
   }
 
-  // If timeline is needed and not loaded yet (e.g. restored state)
+  // Always pre-load timeline posts on mount so all tabs are ready without a visible reload
   useEffect(function(){
-    if ((contentSub==='Timeline'||contentSub==='Images'||contentSub==='Hybrid') && !postsLoaded && props.session) {
+    if (props.session && !postsLoaded) {
       loadPostsData(props.session);
     }
   }, [props.session]);
@@ -3804,7 +3905,7 @@ function SubsPage(props) {
       <h2 style=${{color:'#f1f1f1',fontSize:20,fontWeight:700,margin:0}}>Subscriptions</h2>
       <div style=${{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
         <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?gridMode:null} gridOrient=${gridOrient} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
-        ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';var st=btnSt(!dis&&contentSub===s);if(dis)st=Object.assign({},st,{color:'#3a3a3a',cursor:'not-allowed',opacity:0.45});return html`<button key=${s} onClick=${dis?null:function(){openContentSub(s);}} style=${st}>${s}</button>`;})}
+        ${['Videos','Images','Timeline'].map(function(s){var st=btnSt(contentSub===s);return html`<button key=${s} onClick=${function(){openContentSub(s);}} style=${st}>${s}</button>`;})}
       </div>
     </div>
     ${props.followStrip&&props.followStrip.length>0?html`<${FollowStrip} actors=${props.followStrip} onChannel=${props.onChannel}/>`:null}
@@ -3821,17 +3922,11 @@ function SubsPage(props) {
     </div>`:null}
     ${contentSub==='Images'?html`<${PostImageGrid} items=${subsPosts} cols=${imgCols} loading=${postsLoading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session} sortOrder=${sortOrder} timeRange=${timeRange} hideLiked=${hideLiked} contentFilter=${contentFilter} hideHistory=${hideHistory} _tick=${gridSizeTick}/>`:null}
     ${contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${subsPosts} loading=${postsLoading} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey=${'subs'} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
-    ${contentSub==='Hybrid'?html`<div>${(function(){
-      var vidItems=(props.videos||[]).map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
-      var postFeedItems=subsPosts.filter(function(x){var p=x.post||x;return !isVid(p)&&!isVidRaw(p);}).map(function(x){return {type:'post',item:x,date:new Date(((x.post||x).indexedAt||(x.post||x).record&&(x.post||x).record.createdAt||0)).getTime()};});
-      var combined=vidItems.concat(postFeedItems).sort(function(a,b){return b.date-a.date;});
-      if(!combined.length&&(props.loading||postsLoading)) return html`<div style=${{color:'#aaa',padding:'32px',textAlign:'center'}}>Loading…</div>`;
-      if(!combined.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No content.</div>`;
-      return html`<div>${combined.map(function(x,i){
-        if(x.type==='vid') return html`<${VideoGrid} key=${'v'+i} videos=${[x.post]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
-        return html`<${PostCard} key=${'p'+i} item=${x.item} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
-      })}</div>`;
-    })()}</div>`:null}
+    ${contentSub==='Hybrid'?html`<${MixedVideoImageGrid}
+      videos=${props.videos||[]}
+      imagePosts=${subsPosts.filter(function(x){var p=x.post||x;return !isVid(p)&&!isVidRaw(p)&&isImagePost(p);})}
+      loading=${props.loading||postsLoading}
+      session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
   </div>`;
 }
 
@@ -3912,7 +4007,7 @@ function FeedPage(props) {
   // Computed views — map feed items to posts for VideoGrid (applies repost author)
   function _mapPost(i){var p=i.post;if(i.reason&&i.reason['$type']==='app.bsky.feed.defs#reasonRepost'&&i.reason.by)p=Object.assign({},p,{_repostedBy:i.reason.by});return p;}
   var feedVideos = feedAllItems.filter(function(i){return i.post&&(isVid(i.post)||isVidRaw(i.post))&&!(i.post.record&&i.post.record.reply);}).map(_mapPost);
-  var gridMode = (contentSub==='Videos'||contentSub==='Hybrid')?'videos':'images';
+  var gridMode = contentSub==='Videos'?'videos':'images';
   var gridOrient = portrait?'portrait':'landscape';
   var imgCols = loadGridSize('images',gridOrient);
   var vidCols = loadGridSize('videos',gridOrient);
@@ -3935,24 +4030,18 @@ function FeedPage(props) {
       <div style=${{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
         <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory}
           gridMode=${(contentSub==='Videos'||contentSub==='Images')?gridMode:null} gridOrient=${gridOrient} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
-        ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';var st=btnSt(!dis&&contentSub===s);if(dis)st=Object.assign({},st,{color:'#3a3a3a',cursor:'not-allowed',opacity:0.45});return html`<button key=${s} onClick=${dis?null:function(){setContentSub(s);}} style=${st}>${s}</button>`;})
+        ${['Videos','Images','Timeline'].map(function(s){var st=btnSt(contentSub===s);return html`<button key=${s} onClick=${function(){setContentSub(s);}} style=${st}>${s}</button>`;})
 }
       </div>
     </div>
     ${contentSub==='Videos'?html`<${VideoGrid} videos=${feedVideos} loading=${feedLoading} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} setHideHistory=${setHideHistory} hasMoreFromAPI=${!!feedCursor} onLoadMoreAPI=${loadMoreItems} gridCols=${vidCols} _tick=${gridSizeTick}/>`:null}
     ${contentSub==='Images'?html`<${PostImageGrid} items=${feedAllItems} cols=${imgCols} loading=${feedLoading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session} hasMoreFromAPI=${!!feedCursor} onLoadMoreAPI=${loadMoreItems} sortOrder=${sortOrder} timeRange=${timeRange} hideLiked=${hideLiked} contentFilter=${contentFilter} hideHistory=${hideHistory} _tick=${gridSizeTick}/>`:null}
     ${contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${feedAllItems} loading=${feedLoading} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey=${'feedTimeline'} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
-    ${contentSub==='Hybrid'?html`<div>${(function(){
-      var vidItems=feedVideos.map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
-      var postItems=feedAllItems.filter(function(i){return i.post&&!isVid(i.post)&&!isVidRaw(i.post);}).map(function(i){return {type:'post',item:i,date:new Date((i.post.indexedAt||i.post.record&&i.post.record.createdAt||0)).getTime()};});
-      var combined=vidItems.concat(postItems).sort(function(a,b){return b.date-a.date;});
-      if(!combined.length&&feedLoading) return html`<div style=${{color:'#aaa',padding:'32px',textAlign:'center'}}>Loading…</div>`;
-      if(!combined.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No content.</div>`;
-      return html`<div>${combined.map(function(x,i){
-        if(x.type==='vid') return html`<${VideoGrid} key=${'v'+i} videos=${[x.post]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
-        return html`<${PostCard} key=${'p'+i} item=${x.item} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
-      })}</div>`;
-    })()}</div>`:null}
+    ${contentSub==='Hybrid'?html`<${MixedVideoImageGrid}
+      videos=${feedVideos}
+      imagePosts=${feedAllItems.filter(function(i){return i.post&&!isVid(i.post)&&!isVidRaw(i.post)&&isImagePost(i.post);})}
+      loading=${feedLoading}
+      session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
   </div>`;
 }
 
@@ -4163,7 +4252,7 @@ function HistoryPage(props) {
     <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:8}}>
       <h2 style=${{color:'#f1f1f1',fontSize:20,fontWeight:700,margin:0}}>History</h2>
       <div style=${{display:'flex',gap:4,alignItems:'center',flexWrap:'wrap'}}>
-        ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';var st=btnSt(!dis&&contentSub===s);if(dis)st=Object.assign({},st,{color:'#3a3a3a',cursor:'not-allowed',opacity:0.45});return html`<button key=${s} onClick=${dis?null:function(){setContentSub(s);}} style=${st}>${s}</button>`;})
+        ${['Videos','Images','Timeline'].map(function(s){var st=btnSt(contentSub===s);return html`<button key=${s} onClick=${function(){setContentSub(s);}} style=${st}>${s}</button>`;})
 }
         ${history.length>0?html`<button onClick=${clearHistory}
           style=${{background:'none',border:'1px solid #3f3f3f',color:'#aaa',padding:'6px 14px',
@@ -4182,15 +4271,10 @@ function HistoryPage(props) {
     ${history.length>0&&contentSub==='Videos'?html`<${VideoGrid} videos=${vidItems} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
     ${history.length>0&&contentSub==='Images'?html`<${PostImageGrid} items=${imgItems} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/>`:null}
     ${history.length>0&&contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${imgItems} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true}/>`:null}
-    ${history.length>0&&contentSub==='Hybrid'?html`<div>
-      ${(function(){
-        var imgPosts = imgItems.filter(function(x){return getPostImages(x.post).length>0;});
-        return html`<div>
-          ${vidItems.length>0?html`<${VideoGrid} videos=${vidItems} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
-          ${imgPosts.length>0?html`<div style=${{marginTop:24}}><${PostImageGrid} items=${imgPosts} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session}/></div>`:null}
-        </div>`;
-      })()}
-    </div>`:null}
+    ${history.length>0&&contentSub==='Hybrid'?html`<${MixedVideoImageGrid}
+      videos=${vidItems}
+      imagePosts=${imgItems.filter(function(x){return isImagePost(x.post);})}
+      session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
   </div>`;
 }
 
@@ -4531,9 +4615,12 @@ function ShareModal(props) {
   const author  = post?(post.author||{}):{};
   const postUrl = props.shareUrl||(post?'https://bsky.app/profile/'+author.handle+'/post/'+post.uri.split('/').pop():'');
   var _cached   = sess&&_dmConvosCache.did===sess.did&&_dmConvosCache.convos!==null;
-  const [convos,   setConvos]   = useState(_cached?_dmConvosCache.convos:[]);
-  const [loading,  setLoading]  = useState(!_cached);
-  const [dmErr,    setDmErr]    = useState(_cached?_dmConvosCache.dmErr:false);
+  var _mutCached = sess&&_mutualsDidsCache.did===sess.did&&_mutualsDidsCache.mutuals!==null;
+  const [convos,        setConvos]        = useState(_cached?_dmConvosCache.convos:[]);
+  const [loading,       setLoading]       = useState(!_cached);
+  const [dmErr,         setDmErr]         = useState(_cached?_dmConvosCache.dmErr:false);
+  const [mutuals,       setMutuals]       = useState(_mutCached?_mutualsDidsCache.mutuals:[]);
+  const [mutualsLoading,setMutualsLoading]= useState(!_mutCached);
   const [msg,      setMsg]      = useState('');
   const [sending,  setSending]  = useState(false);
   const [err,      setErr]      = useState('');
@@ -4555,6 +4642,15 @@ function ShareModal(props) {
   },[]);
 
   useEffect(function(){
+    if(!sess||_mutCached) return;
+    var cancelled=false;
+    ensureMutuals(sess).then(function(muts){
+      if(!cancelled){ setMutuals(muts); setMutualsLoading(false); }
+    }).catch(function(){if(!cancelled) setMutualsLoading(false);});
+    return function(){cancelled=true;};
+  },[]);
+
+  useEffect(function(){
     function onDown(e){if(panelRef.current&&!panelRef.current.contains(e.target))props.onClose();}
     function onScroll(){props.onClose();}
     document.addEventListener('mousedown',onDown);
@@ -4572,6 +4668,26 @@ function ShareModal(props) {
     setSelected(function(prev){var n=new Set(prev);if(n.has(key))n.delete(key);else n.add(key);return n;});
   }
 
+  // Build unified share target list: convo users first (sorted by most recent DM), then remaining mutuals
+  var shareTargets=(function(){
+    if(!sess) return [];
+    var seen=new Set(); var targets=[];
+    (convos||[]).forEach(function(c){
+      var other=(c.members||[]).find(function(m){return m.did!==sess.did;})||c.members[0]||{};
+      if(other.did&&!seen.has(other.did)){
+        seen.add(other.did);
+        targets.push({key:c.id,did:other.did,displayName:other.displayName||'',handle:other.handle||'',avatar:other.avatar||null,convoId:c.id});
+      }
+    });
+    (mutuals||[]).forEach(function(f){
+      if(!seen.has(f.did)){
+        seen.add(f.did);
+        targets.push({key:f.did,did:f.did,displayName:f.displayName||'',handle:f.handle||'',avatar:f.avatar||null,convoId:null});
+      }
+    });
+    return targets;
+  })();
+
   async function sendAll(){
     if(!sess||sending||selected.size===0) return;
     setSending(true); setErr('');
@@ -4582,8 +4698,17 @@ function ShareModal(props) {
       var keys=Array.from(selected);
       for(var ki=0;ki<keys.length;ki++){
         var key=keys[ki];
+        var target=shareTargets.find(function(t){return t.key===key;});
+        if(!target) continue;
         try{
-          var convoId=key;
+          var convoId=target.convoId;
+          if(!convoId){
+            var gcUrl=CHAT_PROXY+'/chat.bsky.convo.getConvoForMembers?_pds='+encodeURIComponent(pdsHost)+'&members='+encodeURIComponent(sess.did)+'&members='+encodeURIComponent(target.did);
+            var gcr=await api(gcUrl,{headers:{Authorization:'Bearer '+sess.accessJwt}});
+            if(!gcr.ok) throw new Error(await gcr.text());
+            var gcd=await gcr.json(); convoId=gcd.convo&&gcd.convo.id;
+            if(!convoId) throw new Error('Could not get convo');
+          }
           var dmMessage;
           if(post&&post.uri&&post.cid){
             dmMessage={text:msg.trim()||'',embed:{'$type':'app.bsky.embed.record',record:{uri:post.uri,cid:post.cid}}};
@@ -4609,11 +4734,10 @@ function ShareModal(props) {
   // to exactly fit the longest name/handle without any JS character-width guessing.
   // Rough estimate: 7px/char for display names (12px Roboto), 6px/char for handles (11px).
   var panelW=(function(){
-    if(!convos.length) return 200;
-    var maxPx=convos.reduce(function(acc,c){
-      var o=(c.members||[]).find(function(m){return m.did!==sess.did;})||c.members[0]||{};
-      var namePx=((o.displayName||'').length)*7;
-      var handlePx=(('@'+(o.handle||'')).length)*6;
+    if(!shareTargets.length) return 200;
+    var maxPx=shareTargets.reduce(function(acc,t){
+      var namePx=(t.displayName.length)*7;
+      var handlePx=(('@'+t.handle).length)*6;
       return Math.max(acc,namePx,handlePx);
     },0);
     // overhead: lr-padding(28) + avatar(28) + gap(10) + gap(10) + checkbox(14) = 90
@@ -4648,10 +4772,11 @@ function ShareModal(props) {
     }
   })();
 
-  return html`<div style=${{position:'fixed',top:0,left:0,width:0,height:0,overflow:'visible',zIndex:4000}}>
+  return html`<div style=${{position:'fixed',top:0,left:0,width:0,height:0,overflow:'visible',zIndex:4000}} onClick=${function(e){e.stopPropagation();}}>
     <div ref=${panelRef} style=${panelStyle}
       onMouseEnter=${props.onPanelEnter||null}
-      onMouseLeave=${props.onPanelLeave||null}>
+      onMouseLeave=${props.onPanelLeave||null}
+      onClick=${function(e){e.stopPropagation();}}>
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 14px',borderBottom:'1px solid #2a2a2a',flexShrink:0}}>
         <span style=${{color:'var(--accent)',fontSize:12,fontWeight:700,letterSpacing:0.5,textTransform:'uppercase'}}>Share with Friends</span>
         <button onClick=${props.onClose} style=${{background:'none',border:'none',color:'#aaa',fontSize:14,cursor:'pointer',lineHeight:1,padding:'2px 4px'}}
@@ -4663,25 +4788,23 @@ function ShareModal(props) {
       ${sess&&!dmErr?html`<div style=${{display:'flex',flexDirection:'column',flex:1,minHeight:0}}>
         ${err?html`<div style=${{padding:'6px 14px',color:'#ff6666',fontSize:11,flexShrink:0,borderBottom:'1px solid #2a2a2a'}}>${err}</div>`:null}
         <div style=${{overflowY:'auto',flex:1}}>
-          ${loading?html`<div style=${{padding:'12px 14px',color:'#555',fontSize:12,textAlign:'center'}}>Loading…</div>`:null}
-          ${!loading&&convos.length===0?html`<div style=${{padding:'12px 14px',color:'#555',fontSize:12}}>No conversations yet.</div>`:null}
-          ${convos.map(function(c){
-            var key=c.id;
-            var other=(c.members||[]).find(function(m){return m.did!==sess.did;})||c.members[0]||{};
-            var sel=selected.has(key);
-            return html`<div key=${key}
+          ${(loading||mutualsLoading)?html`<div style=${{padding:'12px 14px',color:'#555',fontSize:12,textAlign:'center'}}>Loading…</div>`:null}
+          ${!loading&&!mutualsLoading&&shareTargets.length===0?html`<div style=${{padding:'12px 14px',color:'#555',fontSize:12}}>No mutual follows yet.</div>`:null}
+          ${shareTargets.map(function(t){
+            var sel=selected.has(t.key);
+            return html`<div key=${t.key}
               style=${{display:'flex',alignItems:'center',gap:10,padding:'7px 14px',
                 borderBottom:'1px solid #1e1e1e',cursor:'pointer',
                 background:sel?'var(--accent-dim)':'transparent',
                 borderLeft:sel?'2px solid var(--accent)':'2px solid transparent',
                 transition:'background 0.1s'}}
-              onClick=${function(){toggleSelect(key);}}
-              onMouseEnter=${function(e){if(!selected.has(key))e.currentTarget.style.background='rgba(255,255,255,0.04)';}}
-              onMouseLeave=${function(e){e.currentTarget.style.background=selected.has(key)?'var(--accent-dim)':'transparent';}}>
-              <${Avatar} src=${other.avatar} size=${28}/>
+              onClick=${function(){toggleSelect(t.key);}}
+              onMouseEnter=${function(e){if(!selected.has(t.key))e.currentTarget.style.background='rgba(255,255,255,0.04)';}}
+              onMouseLeave=${function(e){e.currentTarget.style.background=selected.has(t.key)?'var(--accent-dim)':'transparent';}}>
+              <${Avatar} src=${t.avatar} size=${28}/>
               <div style=${{minWidth:0}}>
-                <div style=${{color:'#f1f1f1',fontSize:12,fontWeight:500,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${other.displayName||other.handle||''}</div>
-                <div style=${{color:'#555',fontSize:11,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>@${other.handle||''}</div>
+                <div style=${{color:'#f1f1f1',fontSize:12,fontWeight:500,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${t.displayName||t.handle||''}</div>
+                <div style=${{color:'#555',fontSize:11,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>@${t.handle||''}</div>
               </div>
               <div style=${{width:14,height:14,border:'1px solid '+(sel?'var(--accent)':'#444'),background:sel?'var(--accent)':'transparent',flexShrink:0,marginLeft:'auto',display:'flex',alignItems:'center',justifyContent:'center'}}>
                 ${sel?html`<svg width="9" height="9" viewBox="0 0 24 24" fill="#000"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>`:null}
@@ -7674,6 +7797,8 @@ function PostCard(props) {
   const text   = rec.text || '';
   const sess   = props.session;
   const [showShare, setShowShare] = useState(false);
+  const savedUris = useContext(SavedUrisCtx);
+  const isSaved = savedUris.has(post.uri);
   const ADULT_LABELS2=['sexual','porn','nudity','graphic-media','adult'];
   const isAdult=!!(post.labels&&post.labels.some(function(l){return ADULT_LABELS2.indexOf(l.val)!==-1;}));
 
@@ -7688,6 +7813,7 @@ function PostCard(props) {
   const [pcDislikeListUri, setPcDislikeListUri] = useState(null);
   const [pcCameToThis,  setPcCameToThis]  = useState(false);
   const [pcCameListUri, setPcCameListUri] = useState(null);
+  const [pcVidHov,      setPcVidHov]      = useState(false);
 
   useEffect(function(){
     setLiked(!!viewerLiked(post)); setLikeUri(viewerLiked(post)||null); setLikeCount(post.likeCount||0);
@@ -7787,10 +7913,16 @@ function PostCard(props) {
   }
 
   var imgs = null;
+  var vidEmbed = null;
   if (embed) {
     var et = embed['$type']||'';
     if (et==='app.bsky.embed.images#view' && embed.images) imgs = embed.images;
-    else if ((et==='app.bsky.embed.recordWithMedia#view'||et==='app.bsky.embed.recordWithMedia') && embed.media && embed.media.images) imgs = embed.media.images;
+    else if (et==='app.bsky.embed.video#view'||et==='app.bsky.embed.video') vidEmbed = embed;
+    else if ((et==='app.bsky.embed.recordWithMedia#view'||et==='app.bsky.embed.recordWithMedia') && embed.media) {
+      var mt=embed.media['$type']||'';
+      if (embed.media.images) imgs = embed.media.images;
+      else if (mt==='app.bsky.embed.video#view'||mt==='app.bsky.embed.video') vidEmbed = embed.media;
+    }
   }
 
   const pcSt = function(active) { return {background:'var(--accent-solid-dim)',border:'1px solid '+(active?'var(--accent)':'#333'),color:'var(--accent)',cursor:sess?'pointer':'default',display:'flex',alignItems:'center',gap:6,fontSize:15,padding:'10px 16px',borderRadius:0,transition:'background 0.15s, color 0.15s'}; };
@@ -7819,15 +7951,32 @@ function PostCard(props) {
             style=${{width:'100%',maxHeight:500,objectFit:'contain',display:'block',background:'#0a0a0a'}}
 />`;})}
         </div>`:null}
+        ${vidEmbed?html`<div style=${{position:'relative',width:'100%',paddingBottom:'56.25%',background:'#111',marginBottom:12,cursor:'pointer'}}
+            onClick=${function(e){e.stopPropagation();props.onWatch&&props.onWatch(post);}}
+            onMouseEnter=${function(){setPcVidHov(true);}}
+            onMouseLeave=${function(){setPcVidHov(false);}}>
+            <div style=${{position:'absolute',top:0,left:0,right:0,bottom:0,overflow:'hidden'}}>
+              ${vidEmbed.thumbnail?html`<img src=${vidEmbed.thumbnail} style=${{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>`:null}
+              <div style=${{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <div style=${{background:'rgba(0,0,0,0.65)',borderRadius:'50%',width:52,height:52,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                  <svg width="26" height="26" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg>
+                </div>
+              </div>
+            </div>
+            <div style=${{position:'absolute',inset:0,zIndex:1,pointerEvents:'none',
+              boxShadow:'inset 0 0 0 2px var(--accent)',
+              opacity:pcVidHov?1:0,transition:'opacity 0.15s'}}/>
+          </div>`:null}
       </div>
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:14}} onClick=${function(e){e.stopPropagation();}}>
         <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
           <button onClick=${function(e){e.stopPropagation();pcClick(e);toggleLike(e);}} style=${pcSt(liked)} onMouseEnter=${pcHover(liked)} onMouseLeave=${function(e){pcLeave(e,liked);}}><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg><span>${liked?'Liked':fmt(likeCount)}</span></button>
           <button onClick=${function(e){e.stopPropagation();pcClick(e);toggleRepost(e);}} style=${pcSt(reposted)} onMouseEnter=${pcHover(reposted)} onMouseLeave=${function(e){pcLeave(e,reposted);}}><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg><span>${reposted?'Reposted':fmt(repostCount)}</span></button>
+          <button onClick=${function(e){e.stopPropagation();if(isSaved){_savedUriSet.delete(post.uri);if(_savedCtxRef.set)_savedCtxRef.set(function(prev){var n=new Set(prev);n.delete(post.uri);return n;});if(sess)bskyRemoveBookmark(sess,post.uri);}else{_savedUriSet.add(post.uri);if(_savedCtxRef.set)_savedCtxRef.set(function(prev){var n=new Set(prev);n.add(post.uri);return n;});if(sess)bskyAddBookmark(sess,post);}}} style=${pcSt(isSaved)} onMouseEnter=${pcHover(isSaved)} onMouseLeave=${function(e){pcLeave(e,isSaved);}} title=${isSaved?'Saved':'Save'}><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H7c-1.1 0-1.99.9-1.99 2L5 21l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg><span>${isSaved?'Saved':'Save'}</span></button>
+          <button onClick=${function(e){e.stopPropagation();pcClick(e);_shareAnchor=e.currentTarget.getBoundingClientRect();setShowShare(true);}} style=${pcSt(false)} onMouseEnter=${pcHover(false)} onMouseLeave=${function(e){pcLeave(e,false);}} title="Share with Friends"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg><span>Share</span></button>
         </div>
         <div style=${{display:'flex',gap:8,alignItems:'center'}}>
           ${sess&&sess.did!==author.did?html`<div onClick=${function(e){e.stopPropagation();}}><${SubscribeButton} did=${author.did} viewer=${author.viewer} session=${sess} small=${false}/></div>`:null}
-          <button onClick=${function(e){e.stopPropagation();pcClick(e);_shareAnchor=e.currentTarget.getBoundingClientRect();setShowShare(true);}} style=${pcSt(false)} onMouseEnter=${pcHover(false)} onMouseLeave=${function(e){pcLeave(e,false);}} title="Share with Friends"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg></button>
         </div>
       </div>
     </div>
@@ -8613,6 +8762,7 @@ function ChannelPostsFeed(props) {
           item=${item}
           session=${sess}
           onChannel=${props.onChannel}
+          onWatch=${props.onWatch}
           onOpenPost=${openPost}
         />`;
       })}
@@ -8653,16 +8803,11 @@ function LikedTab(props) {
     ${!props.loading&&contentSub==='Videos'?html`<${VideoGrid} videos=${props.videos||[]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${props.setSortOrder} timeRange=${timeRange} setTimeRange=${props.setTimeRange} hideLiked=${hideLiked} setHideLiked=${props.setHideLiked} contentFilter=${contentFilter} setContentFilter=${props.setContentFilter} hideHistory=${hideHistory} setHideHistory=${props.onToggleHideHistory} hasMoreFromAPI=${props.hasMore} onLoadMoreAPI=${props.onLoadMore} gridCols=${vidCols} _tick=${gridSizeTick}/>`:null}
     ${!props.loading&&contentSub==='Images'?html`<${PostImageGrid} items=${props.posts||[]} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${props.session} sortOrder=${sortOrder} timeRange=${timeRange} hideLiked=${hideLiked} contentFilter=${contentFilter} hideHistory=${hideHistory} _tick=${gridSizeTick}/>`:null}
     ${!props.loading&&contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${props.posts||[]} loading=${false} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch} hideFilter=${true} sortOrder=${sortOrder} setSortOrder=${props.setSortOrder} timeRange=${timeRange} setTimeRange=${props.setTimeRange}/>`:null}
-    ${!props.loading&&contentSub==='Hybrid'?html`<div>${(function(){
-      var vidItems=(props.videos||[]).map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
-      var postItems=(props.posts||[]).filter(function(x){var p=x.post||x;return !isVid(p)&&!isVidRaw(p);}).map(function(x){return {type:'post',item:x,date:new Date(((x.post||x).indexedAt||(x.post||x).record&&(x.post||x).record.createdAt||0)).getTime()};});
-      var combined=vidItems.concat(postItems).sort(function(a,b){return b.date-a.date;});
-      if(!combined.length) return html`<div style=${{color:'#555',padding:'32px',textAlign:'center'}}>No liked content.</div>`;
-      return html`<div>${combined.map(function(x,i){
-        if(x.type==='vid') return html`<${VideoGrid} key=${'v'+i} videos=${[x.post]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
-        return html`<${PostCard} key=${'p'+i} item=${x.item} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
-      })}</div>`;
-    })()}</div>`:null}
+    ${!props.loading&&contentSub==='Hybrid'?html`<${MixedVideoImageGrid}
+      videos=${props.videos||[]}
+      imagePosts=${(props.posts||[]).filter(function(x){return isImagePost(x.post||x);})}
+      loading=${props.loading}
+      session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
     ${props.hasMore?html`<div ref=${sentinelRef} style=${{height:1}}/>`:null}
     ${props.loadingMore?html`<${RaccNetLoadingIndicator} label="Loading more"/>`:null}
   </div>`;
@@ -8703,7 +8848,7 @@ function ChannelDMsTab(props) {
       });
       setTimeout(function(){
         if(scrollRef.current) scrollRef.current.scrollTop=scrollRef.current.scrollHeight;
-        window.scrollTo(0,document.body.scrollHeight);
+        window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});
       },150);
     }
   },[loading]);
@@ -9825,6 +9970,7 @@ function ChannelPage(props) {
     setProfileData(null); setChannelVideos([]); setChannelLoading(true); setCustomSettingsLoaded(false); setCustomIconUrl(null); setCustomBannerUrl(null); setChannelImagePosts([]); setImagePostsLoaded(false); setImagePostsLoading(false); setLikedPosts([]); setLikedVids([]); setLikedLoaded(false); setLikedCursor(null); setLikedHasMore(false);
     (async function(){
       try{
+        await autoRefreshSession(); // Ensure token is fresh before authenticated calls
         const sess = loadSession();
         const profileUrl = sess
           ? AUTH_PROXY+'/app.bsky.actor.getProfile?actor='+encodeURIComponent(actor)
@@ -11061,11 +11207,11 @@ function ChannelPage(props) {
                     var rec=t.post&&t.post.record;
                     return html`<div key=${t.recordUri}
                       style=${{padding:'8px 12px',borderBottom:'1px solid var(--accent)',
-                        display:'flex',flexDirection:'column',gap:4}}>
-                      <div style=${{fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word'}}>
+                        display:'flex',flexDirection:'row',alignItems:'flex-start',gap:8}}>
+                      <div style=${{flex:'1 1 0',minWidth:0,fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word'}}>
                         ${renderMarkdown(rec&&rec.text||'',props.onChannel,triggerSearch)}
                       </div>
-                      <div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:4}}>
+                      <div style=${{display:'flex',alignItems:'center',flexShrink:0,gap:4}}>
                         <span style=${{fontSize:11,color:'#555',whiteSpace:'nowrap'}}>${ago(rec&&rec.createdAt||'')}</span>
                         ${!isOwn&&sess?html`<${ThoughtActions} post=${t.post} session=${sess}/>`:null}
                         ${isOwn?html`<button onClick=${function(){removeThought(t.recordUri,t.post&&t.post.uri);}}
@@ -11189,11 +11335,11 @@ function ChannelPage(props) {
               ${thoughtsPosts.map(function(t,i){
                 var rec=t.post&&t.post.record;
                 return html`<div key=${t.recordUri}
-                  style=${{padding:'8px 12px',borderBottom:'1px solid var(--accent)',display:'flex',flexDirection:'column',gap:4}}>
-                  <div style=${{fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word'}}>
+                  style=${{padding:'8px 12px',borderBottom:'1px solid var(--accent)',display:'flex',flexDirection:'row',alignItems:'flex-start',gap:8}}>
+                  <div style=${{flex:'1 1 0',minWidth:0,fontSize:13,color:'#f1f1f1',lineHeight:1.55,wordBreak:'break-word'}}>
                     ${renderMarkdown(rec&&rec.text||'',props.onChannel,triggerSearch)}
                   </div>
-                  <div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:4}}>
+                  <div style=${{display:'flex',alignItems:'center',flexShrink:0,gap:4}}>
                     <span style=${{fontSize:11,color:'#555',whiteSpace:'nowrap'}}>${ago(rec&&rec.createdAt||'')}</span>
                     ${!isOwn&&sess?html`<${ThoughtActions} post=${t.post} session=${sess}/>`:null}
                     ${isOwn?html`<button onClick=${function(){removeThought(t.recordUri,t.post&&t.post.uri);}}
@@ -11320,7 +11466,7 @@ function ChannelPage(props) {
         </div>
         ${(tab==='Content'||tab==='Reposts'||tab==='Likes'||(tab&&tab.startsWith('pl:'))||(tab==='Playlists'&&!!playlistView))?html`<div style=${{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap',marginRight:portrait?0:8,marginLeft:portrait?'auto':0,padding:portrait?'4px 4px':0}}>
           <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?(contentSub==='Images'?'images':'videos'):null} gridOrient=${portrait?'portrait':'landscape'} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
-          ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';return html`<button key=${s} onClick=${dis?null:function(){openContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:!dis&&contentSub===s?'var(--accent)':'none',color:dis?'#3a3a3a':contentSub===s?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:dis?'not-allowed':'pointer',borderRadius:0,opacity:dis?0.45:1}}>${s}</button>`;})}
+          ${['Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){openContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:contentSub===s?'var(--accent)':'none',color:contentSub===s?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>${s}</button>`;})}
         </div>`:null}
       </div>
     </div>
@@ -11334,15 +11480,11 @@ function ChannelPage(props) {
         var imgCols = loadGridSize('images', portrait?'portrait':'landscape');
         return html`<${PostImageGrid} items=${imgPosts} cols=${imgCols} loading=${false} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${sess||null} sortOrder=${sortOrder} timeRange=${timeRange} hideLiked=${hideLiked} contentFilter=${contentFilter} hideHistory=${hideHistory} _tick=${gridSizeTick}/>`;
       })()}</div>`:null}
-      ${tab==='Content'&&contentSub==='Hybrid'?html`<div>${(function(){
-        var vidItems = channelVideos.map(function(v){return {type:'vid',post:v,date:new Date(v.indexedAt||v.record&&v.record.createdAt||0).getTime()};});
-        var postItems = allPosts.map(function(item){var p=item.post||item;return {type:'post',item:item,date:new Date(p.indexedAt||p.record&&p.record.createdAt||0).getTime()};});
-        var combined = vidItems.concat(postItems).sort(function(a,b){return b.date-a.date;});
-        return html`<div>${combined.map(function(x,i){
-          if(x.type==='vid') return html`<${VideoGrid} key=${'v'+i} videos=${[x.post]} loading=${false} session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`;
-          return html`<${PostCard} key=${'p'+i} item=${x.item} session=${props.session} onChannel=${props.onChannel} onWatch=${props.onWatch}/>`;
-        })}</div>`;
-      })()}</div>`:null}
+      ${tab==='Content'&&contentSub==='Hybrid'?html`<${MixedVideoImageGrid}
+        videos=${channelVideos}
+        imagePosts=${allPosts.filter(function(x){return isImagePost(x.post||x);})}
+        loading=${channelLoading}
+        session=${props.session} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
       ${tab==='Content'&&(contentSub==='Timeline'||contentSub==='Posts')?html`<div>
         ${isOwn&&sess?html`<div style=${{marginBottom:16,paddingBottom:16,borderBottom:'1px solid #1e1e1e'}}>
           <input type='file' accept='image/*' ref=${composeFileRef} style=${{display:'none'}}
@@ -11599,7 +11741,7 @@ function ActivityPage(props) {
   const mobileCols = loadMobileCols();
   const TABS = ['Likes','Reposts','Saves','Playlists','Lists','Starter Packs'];
   const [tab, setTab] = useState('Likes');
-  const [contentSub, setContentSub] = useState(function(){ var cs=loadContentSub(); return (cs==='Hybrid'||cs==='Timeline')?'Videos':cs; });
+  const [contentSub, setContentSub] = useState(function(){ var cs=loadContentSub(); return cs==='Hybrid'?'Videos':cs; });
   const [sortOrder, setSortOrder] = useState('Latest');
   const [timeRange, setTimeRange] = useState('All Time');
   const [hideLiked, setHideLiked] = useState(false);
@@ -11878,7 +12020,7 @@ function ActivityPage(props) {
         </div>
         ${showSortBar?html`<div style=${{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap',marginRight:portrait?0:8,marginLeft:portrait?'auto':0,padding:portrait?'4px 4px':0}}>
           <${SortButton} variant='solid' sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} hideHistory=${hideHistory} onToggleHideHistory=${setHideHistory} gridMode=${(contentSub==='Videos'||contentSub==='Images')?(contentSub==='Images'?'images':'videos'):null} gridOrient=${portrait?'portrait':'landscape'} onGridTick=${function(){setGridSizeTick(function(t){return t+1;});}}/>
-          ${['Hybrid','Videos','Images','Timeline'].map(function(s){var dis=s==='Hybrid'||s==='Timeline';return html`<button key=${s} onClick=${dis?null:function(){setContentSub(s);saveContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:!dis&&contentSub===s?'var(--accent)':'none',color:dis?'#3a3a3a':contentSub===s?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:dis?'not-allowed':'pointer',borderRadius:0,opacity:dis?0.45:1}}>${s}</button>`;})}
+          ${['Videos','Images','Timeline'].map(function(s){return html`<button key=${s} onClick=${function(){setContentSub(s);saveContentSub(s);}} style=${{padding:portrait?'4px 10px':'6px 14px',background:contentSub===s?'var(--accent)':'none',color:contentSub===s?'#000':'#aaa',border:'none',fontSize:portrait?11:13,fontWeight:600,cursor:'pointer',borderRadius:0}}>${s}</button>`;})}
         </div>`:null}
       </div>
     </div>
@@ -11889,7 +12031,11 @@ function ActivityPage(props) {
         ${!repostsLoading&&reposts.length===0&&repostsLoaded?html`<div style=${{color:'#555',padding:'32px 0',textAlign:'center'}}>No reposts found.</div>`:null}
         ${contentSub==='Videos'?html`<${VideoGrid} items=${reposts} loading=${false} session=${sess} onWatch=${props.onWatch} onChannel=${props.onChannel} sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange} hideLiked=${hideLiked} setHideLiked=${setHideLiked} contentFilter=${contentFilter} setContentFilter=${setContentFilter} gridCols=${vidCols} _tick=${gridSizeTick} hasMoreFromAPI=${repostsHasMore} onLoadMoreAPI=${_actLoadMoreReposts}/>`:null}
         ${contentSub==='Images'?html`<${PostImageGrid} items=${reposts} cols=${imgCols} loading=${repostsLoading} onWatch=${props.onWatch} onChannel=${props.onChannel} session=${sess} hasMoreFromAPI=${repostsHasMore} onLoadMoreAPI=${_actLoadMoreReposts} sortOrder=${sortOrder} timeRange=${timeRange} hideLiked=${hideLiked} contentFilter=${contentFilter} hideHistory=${hideHistory} _tick=${gridSizeTick}/>`:null}
-        ${(contentSub==='Hybrid'||contentSub==='Timeline')?html`<${ChannelPostsFeed} posts=${reposts} loading=${false} session=${sess} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey="activity_reposts" sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
+        ${contentSub==='Timeline'?html`<${ChannelPostsFeed} posts=${reposts} loading=${false} session=${sess} onChannel=${props.onChannel} onWatch=${props.onWatch} stateKey="activity_reposts" sortOrder=${sortOrder} setSortOrder=${setSortOrder} timeRange=${timeRange} setTimeRange=${setTimeRange}/>`:null}
+        ${contentSub==='Hybrid'?html`<${MixedVideoImageGrid}
+          videos=${reposts.filter(function(x){var p=x.post||x;return isVid(p)||isVidRaw(p);}).map(function(x){return x.post||x;})}
+          imagePosts=${reposts.filter(function(x){return isImagePost(x.post||x);})}
+          session=${sess} onWatch=${props.onWatch} onChannel=${props.onChannel}/>`:null}
         ${repostsLoadingMore?html`<${RaccNetLoadingIndicator} label="Loading more reposts…"/>`:null}
       </div>`:null}
       ${tab==='Saves'?html`<div>
@@ -12978,28 +13124,39 @@ function App() {
         .catch(function(){});
     }
     // On startup, try to refresh the token. If refresh fails, validate or clear.
+    // IMPORTANT: only clear session on explicit auth failures (401/403).
+    // Never clear on 429 (rate limited) or 5xx/network errors — those are transient.
     if(saved && saved.refreshJwt){
       _sessionRef.current = saved;
       api(AUTH_PROXY+'/com.atproto.server.refreshSession',
         {method:'POST', headers:{'Authorization':'Bearer '+saved.refreshJwt}})
-        .then(function(r){ return r.ok?r.json():Promise.reject(); })
+        .then(function(r){
+          if(r.status===429||r.status>=500) return null; // transient — keep existing session
+          return r.ok?r.json():Promise.reject();
+        })
         .then(function(d){
+          if(!d) return; // transient error — skip update, keep existing session
           const updated=Object.assign({},saved,{accessJwt:d.accessJwt,refreshJwt:d.refreshJwt||saved.refreshJwt});
           saveSession(updated); setSession(updated); _sessionRef.current=updated;
           loadSavedFeeds(updated);
         })
         .catch(function(){
-          // Refresh failed — check if existing token still works
+          // Refresh token itself is invalid — validate with existing access token
           api(AUTH_PROXY+'/app.bsky.actor.getProfile?actor='+encodeURIComponent(saved.did),
             {headers:{Authorization:'Bearer '+saved.accessJwt}})
-            .then(function(r){ if(!r.ok){ clearSession(); setSession(null); _sessionRef.current=null; } })
+            .then(function(r){
+              // Only clear session on definitive auth rejection, not on rate limit / server errors
+              if(r.status===401||r.status===403){ clearSession(); setSession(null); _sessionRef.current=null; }
+            })
             .catch(function(){});
         });
     } else if(saved){
       _sessionRef.current = saved;
       api(AUTH_PROXY+'/app.bsky.actor.getProfile?actor='+encodeURIComponent(saved.did),
         {headers:{Authorization:'Bearer '+saved.accessJwt}})
-        .then(function(r){ if(!r.ok){ clearSession(); setSession(null); _sessionRef.current=null; } })
+        .then(function(r){
+          if(r.status===401||r.status===403){ clearSession(); setSession(null); _sessionRef.current=null; }
+        })
         .catch(function(){});
     }
     // Restore last location
@@ -13023,11 +13180,34 @@ function App() {
     setSessionLoaded(true);
   },[]);
 
+  // If session exists but avatar/displayName are missing (e.g. login happened during rate limit),
+  // fetch the profile in the background and patch the stored session.
+  useEffect(function(){
+    var s = session;
+    if(!s||s.avatar) return;
+    var cancelled=false;
+    api(AUTH_PROXY+'/app.bsky.actor.getProfile?actor='+encodeURIComponent(s.did),
+      {headers:{Authorization:'Bearer '+s.accessJwt}})
+      .then(function(r){return r.ok?r.json():null;})
+      .then(function(pd){
+        if(!pd||cancelled) return;
+        var updated=Object.assign({},s,{avatar:pd.avatar||s.avatar,displayName:pd.displayName||s.displayName});
+        saveSession(updated); setSession(updated); _sessionRef.current=updated;
+      })
+      .catch(function(){});
+    return function(){cancelled=true;};
+  },[session&&session.did]);
+
   // Pre-load DM conversations in the background as soon as a session is available
   // so the Share with Friends panel opens instantly without waiting for a fetch.
+  // Refresh the token first so the DM call succeeds even if the stored token has expired.
+  // Mutuals are NOT pre-loaded here — they are fetched lazily on first ShareModal open
+  // to avoid burning rate-limit budget on startup with up to 20 paginated API calls.
   useEffect(function(){
-    var s = loadSession();
-    if(s && s.accessJwt) ensureDmConvos(s).catch(function(){});
+    autoRefreshSession().then(function(){
+      var s = loadSession();
+      if(s && s.accessJwt) ensureDmConvos(s).catch(function(){});
+    });
   },[]);
 
   const portrait = usePortrait();
